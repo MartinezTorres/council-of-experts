@@ -1,0 +1,34 @@
+{
+  "name": "council-of-experts-root",
+  "version": "1.0.0",
+  "description": "Role-agnostic AI agent orchestration library - Provider pattern for multi-agent collaboration",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "keywords": [
+    "ai-agents",
+    "multi-agent-system",
+    "llm-orchestration",
+    "role-agnostic",
+    "dependency-injection"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/council-of-experts.git"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

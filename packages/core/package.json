@@ -1,0 +1,52 @@
+{
+  "name": "council-of-experts",
+  "version": "1.0.0",
+  "description": "Role-agnostic, permission-agnostic AI agent orchestration library for multi-agent collaboration systems",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "ai-agents",
+    "multi-agent-system",
+    "ai-orchestration",
+    "llm",
+    "openai",
+    "anthropic",
+    "function-calling",
+    "tool-calling",
+    "expert-system",
+    "role-agnostic",
+    "dependency-injection",
+    "provider-pattern",
+    "collaborative-ai"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/council-of-experts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/council-of-experts/issues"
+  },
+  "homepage": "https://github.com/your-org/council-of-experts#readme",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}
