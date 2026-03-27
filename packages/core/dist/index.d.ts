@@ -12,6 +12,6 @@ export type { Tool, ToolParameter, ToolExecutionContext, ToolResult, ToolExecuto
 export type { CouncilConfig } from './types.js';
 export type { OpenAIFunction, OpenAIMessage, OpenAIToolCall } from './types.js';
 export type { Diagnostic } from './types.js';
-export { removeThinkingTags, toOpenAIFunction, estimateTokens, generateCacheKey } from './utils.js';
+export { removeThinkingTags, toOpenAIFunction, estimateTokens, generateCacheKey, parseMentions, filterExpertsByMention, filterExpertsByRecentActivity } from './utils.js';
 export { DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS, AI_TIMEOUT_MS, SUMMARY_CACHE_MAX_SIZE, DIAGNOSTICS_MAX_PER_MODEL, CHARS_PER_TOKEN, LARGE_ATTACHMENT_THRESHOLD_TOKENS, ANALYSIS_MAX_TOKENS } from './constants.js';
 //# sourceMappingURL=index.d.ts.map

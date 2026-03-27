@@ -234,9 +234,9 @@ export class ToolSystem {
           const userPrompt = `Document content:\n\n${fileContents}\n\nQuestion: ${args.question}\n\nProvide a clear answer:`;
 
           try {
-            const chatSystemPrompt = await this.settingsProvider.getChatSystemPrompt();
-            const config = await this.settingsProvider.getSummarizationConfig();
-            const modelName = config?.model || 'default';
+            const chatSystemPrompt = await this.settingsProvider.getSetting<string>('chat_system_prompt');
+            const summarizationModel = await this.settingsProvider.getSetting<string>('summarization_model');
+            const modelName = summarizationModel || 'default';
 
             const response = await this.aiClient.chat(
               userPrompt,

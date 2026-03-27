@@ -1,21 +1,13 @@
-# Council of Experts
+# council-of-experts
 
-A role-agnostic, permission-agnostic AI agent orchestration library for multi-agent collaboration systems.
+Multi-agent AI orchestration library with tool calling, parallel execution, and provider-based architecture.
 
-## Overview
+## What It Does
 
-Council of Experts enables you to orchestrate multiple AI agents (experts) working together on tasks. The library is designed to be completely independent of your application's permission system, business logic, and data storage - you provide the data access layer, we handle the AI orchestration.
-
-### Key Features
-
-- **Role-Agnostic**: No built-in permission logic - enforce roles at your application layer
-- **Provider Pattern**: Dependency injection via simple interfaces
-- **OpenAI-Compatible**: Works with OpenAI, Anthropic, local models, and any OpenAI-compatible API
-- **Built-in Tools**: Attachment analysis, document editing, suggestion creation
-- **Custom Tools**: Register your own tools for domain-specific functionality
-- **Parallel Execution**: Multiple experts run concurrently
-- **Diagnostic Tracking**: LRU cache for debugging AI requests/responses
-- **Real-time Events**: Optional WebSocket broadcasting for live updates
+- **Orchestrate multiple AI agents** in parallel responding to user messages
+- **Tool system** - Agents can call functions to read documents, analyze attachments, suggest edits
+- **Provider-based** - Bring your own storage, settings, and logging via clean interfaces
+- **OpenAI-compatible** - Works with any OpenAI-compatible API (local LLMs, cloud providers)
 
 ## Installation
 
@@ -23,256 +15,349 @@ Council of Experts enables you to orchestrate multiple AI agents (experts) worki
 npm install council-of-experts
 ```
 
-Or use as a local dependency:
-
-```json
-{
-  "dependencies": {
-    "council-of-experts": "file:path/to/council-of-experts/packages/core"
-  }
-}
-```
-
 ## Quick Start
-
-### 1. Implement Provider Interfaces
-
-The library requires you to implement 4 provider interfaces that connect it to your application:
-
-```typescript
-import {
-  DocumentProvider,
-  SettingsProvider,
-  LoggerProvider,
-  EventBroadcaster
-} from 'council-of-experts';
-
-// Provide document access
-class MyDocumentProvider implements DocumentProvider {
-  async getDocument(id: string) {
-    // Return document from your storage
-    return { id, content: "...", version: 1 };
-  }
-
-  async createSuggestion(documentId: string, content: string, baseVersion: number, userId: string) {
-    // Create a change suggestion in your system
-    return { id: "sugg-123", created_by: userId, created_at: new Date().toISOString(), base_version: baseVersion };
-  }
-
-  async getAttachment(documentId: string, attachmentId: string) {
-    // Return attachment from your storage
-    return null; // or attachment data
-  }
-}
-
-// Provide configuration access
-class MySettingsProvider implements SettingsProvider {
-  async getModel(modelName: string) {
-    // Return AI model configuration
-    return {
-      name: modelName,
-      url: "http://localhost:1234/v1",
-      model: "gpt-4",
-      api_key: ""
-    };
-  }
-
-  async getTimeoutMs() { return 120000; }
-  async getSummarizationConfig() { return null; }
-  async getChatSystemPrompt() { return null; }
-}
-
-// Optional: Provide logging
-class MyLoggerProvider implements LoggerProvider {
-  async logOperation(operation: string, userId: string, metadata?: any) {
-    console.log(`[${operation}] ${userId}`, metadata);
-  }
-
-  async logError(operation: string, error: Error) {
-    console.error(`[${operation}]`, error);
-  }
-}
-
-// Optional: Real-time event broadcasting (Socket.IO example)
-class MyEventBroadcaster implements EventBroadcaster {
-  constructor(private io: any) {}
-
-  emit(room: string, event: string, data: any) {
-    this.io.to(room).emit(event, data);
-  }
-}
-```
-
-### 2. Initialize Council Orchestrator
 
 ```typescript
 import { CouncilOrchestrator } from 'council-of-experts';
 
+// 1. Implement providers (or use examples from packages/cli)
 const council = new CouncilOrchestrator({
   documentProvider: new MyDocumentProvider(),
   settingsProvider: new MySettingsProvider(),
-  loggerProvider: new MyLoggerProvider(),
-  broadcaster: new MyEventBroadcaster(io)
+  loggerProvider: new MyLogger(),
+  broadcaster: new MyBroadcaster() // optional
 });
-```
 
-### 3. Define Experts
-
-```typescript
+// 2. Define experts
 const experts = [
   {
-    userId: "system-agent:SecurityExpert",
-    name: "SecurityExpert",
-    icon: "🔒",
-    systemPrompt: "You are a security expert. Review code for vulnerabilities...",
-    model: "gpt-4",
-    temperature: 0.3
+    userId: 'agent-1',
+    name: 'Analyst',
+    icon: '📊',
+    systemPrompt: 'You analyze data and provide insights.',
+    model: 'gpt-4',
+    temperature: 0.7
   },
   {
-    userId: "system-agent:CodeReviewer",
-    name: "CodeReviewer",
-    icon: "👨‍💻",
-    systemPrompt: "You are a code reviewer. Focus on code quality...",
-    model: "gpt-4",
-    temperature: 0.5
+    userId: 'agent-2',
+    name: 'Writer',
+    icon: '✍️',
+    systemPrompt: 'You write and edit content clearly.',
+    model: 'gpt-4',
+    temperature: 0.8
   }
 ];
-```
 
-### 4. Orchestrate Collaboration
-
-```typescript
-// Set up response callback
-council.onResponse(async (response, documentId) => {
-  console.log(`Expert ${response.expertUserId} responded:`, response.message);
-  // Save the response to your database/storage
-});
-
-// Trigger orchestration
-await council.orchestrate(
-  "doc-123",                    // documentId
-  "Please review this code",    // userMessage
-  "user-456",                   // triggerUserId
-  experts,                      // experts to invoke
-  {
-    documentContent: "const x = 1;",
-    chatHistory: []
-  },
-  { isIndirectInvocation: false }
-);
-```
-
-## Architecture
-
-### Provider Pattern
-
-Council uses the **Provider Pattern** (dependency injection) to remain completely decoupled from your application:
-
-```
-┌─────────────────────────────────────┐
-│   Your Application                  │
-│   ┌─────────────────────────────┐   │
-│   │  Adapters (Your Code)       │   │
-│   │  - MyDocumentProvider       │   │
-│   │  - MySettingsProvider       │   │
-│   │  - MyLoggerProvider         │   │
-│   │  - MyEventBroadcaster       │   │
-│   └─────────────────────────────┘   │
-│              ▲                       │
-│              │                       │
-│   ┌──────────┴──────────────────┐   │
-│   │  CouncilOrchestrator        │   │
-│   │  (council-of-experts)       │   │
-│   │  - AIClient                 │   │
-│   │  - ToolSystem               │   │
-│   │  - Parallel execution       │   │
-│   └─────────────────────────────┘   │
-└─────────────────────────────────────┘
-```
-
-### Built-in Tools
-
-Council provides 4 built-in tools that experts can use:
-
-1. **get_attachment**: Retrieve a specific attachment
-2. **list_attachments**: List all attachments on a document
-3. **suggest_edit**: Create a content suggestion (respects your application's permission model)
-4. **analyze_attachment**: Request human to analyze an attachment
-
-### Custom Tools
-
-Register custom tools for domain-specific functionality:
-
-```typescript
+// 3. Register custom tools (optional)
 council.registerTool(
   {
-    name: "search_database",
-    description: "Search the company database",
+    name: 'search_web',
+    description: 'Search the web for information',
     parameters: {
-      query: { type: "string", description: "Search query", required: true }
+      query: { type: 'string', description: 'Search query', required: true }
     },
-    needsProcessing: true  // Expert should see the results
+    needsProcessing: true // Agent sees result
   },
   async (args, context) => {
-    const results = await searchDB(args.query);
+    const results = await mySearchAPI(args.query);
     return {
-      tool: "search_database",
-      result: JSON.stringify(results),
+      tool: 'search_web',
+      result: results,
       success: true
     };
   }
 );
+
+// 4. Orchestrate agents
+await council.orchestrate(
+  'document-123',           // Document ID
+  '@Analyst what trends do you see?',  // User message
+  'user-456',              // User ID
+  experts,                 // Experts to invoke
+  {
+    documentContent: 'Q2 2024 Revenue: $5.2M (+15% YoY)...',
+    chatHistory: 'Previous messages...'
+  }
+);
+
+// 5. Handle responses
+council.onResponse(async (response, documentId) => {
+  console.log(`${response.expertUserId}: ${response.message}`);
+  // Save to database, broadcast via WebSocket, etc.
+});
 ```
+
+## Architecture
+
+### Provider Interfaces
+
+Implement these to connect council-of-experts to your application:
+
+```typescript
+interface DocumentProvider {
+  getDocument(id: string): Promise<Document>;
+  createSuggestion(documentId, content, baseVersion, userId): Promise<SuggestionResult>;
+  getAttachment(documentId, attachmentId): Promise<Attachment | null>;
+}
+
+interface SettingsProvider {
+  getModel(modelName: string): Promise<AIModel | null>;
+  getSetting<T>(key: string, defaultValue?: T): Promise<T>;
+}
+
+interface LoggerProvider {
+  logOperation(operation: string, userId: string, metadata?: any): Promise<void>;
+  logError(operation: string, error: Error): Promise<void>;
+}
+
+interface EventBroadcaster {
+  emit(room: string, event: string, data: any): void;
+}
+```
+
+### Built-in Tools
+
+Agents automatically have access to:
+
+- `get_attachment` - Read attachment content
+- `list_attachments` - List available attachments
+- `suggest_edit` - Suggest document edits
+- `analyze_attachment` - AI-powered attachment analysis
+
+### Custom Tools
+
+Register your own tools:
+
+```typescript
+council.registerTool(tool, executor);
+```
+
+Tools can either:
+- **Need processing** (`needsProcessing: true`) - Agent sees the result and responds
+- **Fire and forget** (`needsProcessing: false`) - Result stored, no follow-up
+
+## Utilities
+
+### Mention Parsing
+
+```typescript
+import { parseMentions, filterExpertsByMention } from 'council-of-experts';
+
+const mentions = parseMentions('@Analyst and @Writer, help me');
+// Returns: Set { 'analyst', 'writer' }
+
+const invoked = filterExpertsByMention(allExperts, mentions);
+```
+
+### Recent Activity Detection
+
+```typescript
+import { filterExpertsByRecentActivity } from 'council-of-experts';
+
+const activeExperts = filterExpertsByRecentActivity(
+  allExperts,
+  recentMessages,
+  10 // lookback count
+);
+```
+
+### Model Discovery & Testing
+
+```typescript
+// Discover models from provider
+const models = await council.aiClient.discoverModels(
+  'http://localhost:1234/v1',
+  'api-key'
+);
+
+// Test connection
+const result = await council.aiClient.testConnection('model-name');
+
+// Test tool support
+const toolSupport = await council.aiClient.testToolSupport('model-name');
+```
+
+## Example Application
+
+See **[packages/cli](./packages/cli)** for a complete working example:
+
+- In-memory providers
+- Interactive chat interface
+- Basic tools (read/write document, introspection)
+- Configuration via JSON
+
+```bash
+cd packages/cli
+npm install
+npm run dev
+```
+
+## Configuration
+
+### Standard Settings Keys
+
+The library uses these standard keys via `SettingsProvider.getSetting()`:
+
+- `ai_timeout_ms` - API timeout (default: 60000)
+- `summarization_model` - Model for summarization
+- `summarization_prompt_template` - Custom prompt template
+- `chat_system_prompt` - Global system prompt
+
+Your provider can support additional keys as needed.
+
+### AI Models
+
+Models must be OpenAI-compatible. Configure via `SettingsProvider.getModel()`:
+
+```typescript
+{
+  name: 'local-llm',
+  url: 'http://localhost:1234/v1',
+  api_key: '',
+  model: 'model-id'
+}
+```
+
+## How It Works
+
+1. **User sends message** mentioning agents
+2. **Orchestrator** invokes mentioned agents in parallel
+3. **Each agent** gets system prompt + context + tools
+4. **Agents respond** via AI API, optionally calling tools
+5. **Tool results** fed back to agent for final response
+6. **Responses** sent via callback to your application
+
+### Direct vs Indirect Invocation
+
+- **Direct** - Agent is `@mentioned` explicitly → must respond
+- **Indirect** - Agent recently active but not mentioned → can respond or "SKIP"
+
+## Diagnostics
+
+Track AI API performance:
+
+```typescript
+// Get diagnostic by ID (from response)
+const diagnostic = council.getDiagnostic(diagnosticId);
+
+// Get all diagnostics for a model
+const diagnostics = council.getModelDiagnostics('gpt-4');
+```
+
+Diagnostics include:
+- Request/response content
+- Token usage
+- Response time
+- Tokens per second
+- Error messages
 
 ## API Reference
 
-See [API.md](docs/API.md) for detailed API documentation.
+### CouncilOrchestrator
 
-## Design Principles
+```typescript
+class CouncilOrchestrator {
+  constructor(config: CouncilConfig)
 
-### 1. Role-Agnostic
+  // Orchestrate agents
+  orchestrate(
+    documentId: string,
+    userMessage: string,
+    triggerUserId: string,
+    experts: Expert[],
+    context: { documentContent?, chatHistory? },
+    options?: { isIndirectInvocation? }
+  ): Promise<void>
 
-The library has **no concept of roles or permissions**. It doesn't know about "authors", "reviewers", or any permission model. Your application enforces permissions by:
+  // Register tools
+  registerTool(tool: Tool, executor: ToolExecutor): void
 
-- Controlling which experts are passed to `orchestrate()`
-- Implementing permission checks in your providers
-- Filtering responses based on user roles
+  // Set response callback
+  onResponse(callback: (response, documentId) => Promise<void>): void
 
-### 2. Permission-Agnostic
+  // Diagnostics
+  getDiagnostic(id: string): Diagnostic | undefined
+  getModelDiagnostics(modelName: string): Diagnostic[]
 
-Council never makes permission decisions. When an expert calls `suggest_edit`, your `DocumentProvider.createSuggestion()` implementation decides whether to allow it.
+  // Summarization
+  summarize(text: string): Promise<string>
 
-### 3. Storage-Agnostic
+  // Direct access
+  aiClient: AIClient
+}
+```
 
-Council has no database, no file system access, no event logs. It only operates on data you provide through the provider interfaces.
+### AIClient
 
-### 4. Framework-Agnostic
+```typescript
+class AIClient {
+  // Chat with model
+  chat(
+    prompt: string,
+    modelName: string,
+    temperature: number,
+    maxTokens?: number,
+    systemPrompt?: string,
+    tools?: OpenAIFunction[]
+  ): Promise<AIResponse>
 
-Works with any Node.js framework (Express, Fastify, Koa, Next.js, etc.)
+  // Model operations
+  discoverModels(url, apiKey?, timeoutMs?): Promise<ModelInfo[]>
+  testConnection(modelName): Promise<TestResult>
+  testToolSupport(modelName): Promise<ToolSupportResult>
 
-## Examples
+  // Summarization
+  summarize(text: string): Promise<string>
+}
+```
 
-See the [examples/](examples/) directory for:
+## Project Structure
 
-- Express integration example
-- Custom tool registration
-- Multi-document orchestration
-- Diagnostic monitoring
+```
+council-of-experts/
+├── packages/
+│   ├── core/              # Main library
+│   │   ├── src/
+│   │   │   ├── CouncilOrchestrator.ts
+│   │   │   ├── AIClient.ts
+│   │   │   ├── ToolSystem.ts
+│   │   │   ├── types.ts
+│   │   │   └── utils.ts
+│   │   └── dist/
+│   │
+│   └── cli/               # Example application
+│       ├── src/
+│       │   ├── index.ts
+│       │   ├── providers.ts  # Example provider implementations
+│       │   ├── tools.ts      # Example custom tools
+│       │   └── chat.ts       # Interactive chat loop
+│       └── config.example.json
+```
 
 ## Development
 
 ```bash
-# Build the library
+# Build core library
 cd packages/core
 npm install
 npm run build
 
-# Run tests
-npm test
+# Build CLI example
+cd packages/cli
+npm install
+npm run build
 
-# Type checking
-npx tsc --noEmit
+# Run CLI
+npm run dev
 ```
+
+## Use Cases
+
+- **Multi-agent code review** - Security, performance, and style experts
+- **Document collaboration** - Writers, editors, and reviewers
+- **Data analysis** - Analysts, statisticians, and visualizers
+- **Content creation** - Researchers, writers, and fact-checkers
+- **Technical support** - Diagnostics, troubleshooting, and documentation experts
 
 ## License
 
@@ -280,10 +365,8 @@ MIT
 
 ## Contributing
 
-Contributions welcome! This is an independent library with no dependencies on specific applications.
-
-When contributing:
-- Maintain role-agnostic design
-- Keep provider interfaces minimal
-- Add tests for new features
-- Update documentation
+Issues and PRs welcome. The library aims to be:
+- **Generic** - No domain-specific logic
+- **Flexible** - Provider-based architecture
+- **Well-tested** - Core functionality covered
+- **Well-documented** - Clear examples and API docs

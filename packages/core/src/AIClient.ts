@@ -46,7 +46,7 @@ export class AIClient {
 
     try {
       const url = model.url.endsWith('/') ? model.url.slice(0, -1) : model.url;
-      const timeoutMs = await this.settings.getTimeoutMs();
+      const timeoutMs = await this.settings.getSetting<number>('ai_timeout_ms', AI_TIMEOUT_MS);
 
       // Build messages
       const messages: Array<{ role: string; content: string }> = [];
@@ -169,10 +169,15 @@ export class AIClient {
    * Generate summary from text
    */
   async summarize(text: string): Promise<string> {
-    const config = await this.settings.getSummarizationConfig();
-    if (!config) {
+    const summarizationModel = await this.settings.getSetting<string>('summarization_model');
+    if (!summarizationModel) {
       return text; // No summarization configured
     }
+
+    const config: SummarizationConfig = {
+      model: summarizationModel,
+      promptTemplate: await this.settings.getSetting<string>('summarization_prompt_template')
+    };
 
     const defaultTemplate = `You are a technical summarizer. Create a concise summary (around 200 words) of the following text:
 
@@ -245,6 +250,156 @@ Summary:`;
       if (firstKey !== undefined) {
         this.summaryCache.delete(firstKey);
       }
+    }
+  }
+
+  /**
+   * Discover available models from a provider
+   * @param url - Provider base URL (e.g. http://localhost:1234)
+   * @param apiKey - Optional API key
+   * @param timeoutMs - Timeout in milliseconds
+   * @returns Array of models with IDs and context sizes
+   */
+  async discoverModels(
+    url: string,
+    apiKey?: string,
+    timeoutMs: number = 10000
+  ): Promise<Array<{ id: string; context_size: number | null }>> {
+    const trimmedUrl = url.endsWith('/') ? url.slice(0, -1) : url;
+    const modelsUrl = `${trimmedUrl}/models`;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(modelsUrl, {
+      headers,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch models (${response.status}): ${response.statusText}`);
+    }
+
+    const data: any = await response.json();
+
+    // OpenAI-compatible API returns models in data array
+    // Extract both model ID and context size if available
+    const models = data.data?.map((m: any) => ({
+      id: m.id,
+      context_size: m.max_model_len || m.context_length || m.max_tokens ||
+                    m.meta?.n_ctx_train || m.params?.num_ctx ||
+                    m.info?.params?.num_ctx || null
+    })) || [];
+
+    return models;
+  }
+
+  /**
+   * Test connection to a model
+   * @param modelName - Name of the model to test
+   * @returns Test result with response time and sample response
+   */
+  async testConnection(
+    modelName: string
+  ): Promise<{
+    success: boolean;
+    response_time_ms: number;
+    test_response?: string;
+    error?: string;
+  }> {
+    try {
+      const startTime = Date.now();
+      const response = await this.chat(
+        'Write a haiku about artificial intelligence and human collaboration. Be creative.',
+        modelName,
+        0.7,
+        100
+      );
+      const responseTime = Date.now() - startTime;
+
+      return {
+        success: true,
+        response_time_ms: responseTime,
+        test_response: response.content.substring(0, 200)
+      };
+    } catch (error) {
+      return {
+        success: false,
+        response_time_ms: 0,
+        error: (error as Error).message
+      };
+    }
+  }
+
+  /**
+   * Test if a model supports tool calling
+   * @param modelName - Name of the model to test
+   * @returns Test result indicating tool support
+   */
+  async testToolSupport(
+    modelName: string
+  ): Promise<{
+    supports_tools: boolean | 'unknown';
+    response_time_ms: number;
+    error?: string;
+  }> {
+    const testTool: OpenAIFunction = {
+      type: 'function',
+      function: {
+        name: 'test_tool',
+        description: 'A test tool for checking tool support',
+        parameters: {
+          type: 'object',
+          properties: {
+            test: { type: 'string', description: 'Test parameter' }
+          },
+          required: ['test']
+        }
+      }
+    };
+
+    const startTime = Date.now();
+    try {
+      await this.chat(
+        'Respond with "OK" if you can see this message.',
+        modelName,
+        0.1,
+        10,
+        'You are a test assistant.',
+        [testTool]
+      );
+      const responseTime = Date.now() - startTime;
+
+      return {
+        supports_tools: true,
+        response_time_ms: responseTime
+      };
+    } catch (error) {
+      const responseTime = Date.now() - startTime;
+      const errorMessage = (error as Error).message;
+
+      // Check for specific error messages that indicate tool support issues
+      if (errorMessage.includes('tools param requires --jinja flag') ||
+          errorMessage.includes('tools') ||
+          errorMessage.includes('function') ||
+          errorMessage.includes('jinja')) {
+        return {
+          supports_tools: false,
+          response_time_ms: responseTime,
+          error: errorMessage
+        };
+      }
+
+      // Other errors might not be related to tool support
+      return {
+        supports_tools: 'unknown',
+        response_time_ms: responseTime,
+        error: errorMessage
+      };
     }
   }
 }

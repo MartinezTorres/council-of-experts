@@ -24,12 +24,11 @@ export interface DocumentProvider {
 
 /**
  * Settings provider - implements configuration access
+ * Generic key-value interface for maximum flexibility
  */
 export interface SettingsProvider {
   getModel(modelName: string): Promise<AIModel | null>;
-  getTimeoutMs(): Promise<number>;
-  getSummarizationConfig(): Promise<SummarizationConfig | null>;
-  getChatSystemPrompt(): Promise<string | null>;
+  getSetting<T>(key: string, defaultValue?: T): Promise<T>;
 }
 
 /**

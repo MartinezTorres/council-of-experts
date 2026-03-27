@@ -70,7 +70,10 @@ export {
   removeThinkingTags,
   toOpenAIFunction,
   estimateTokens,
-  generateCacheKey
+  generateCacheKey,
+  parseMentions,
+  filterExpertsByMention,
+  filterExpertsByRecentActivity
 } from './utils.js';
 
 // Constants

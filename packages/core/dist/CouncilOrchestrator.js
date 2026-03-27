@@ -157,7 +157,7 @@ export class CouncilOrchestrator {
     async buildSystemPrompt(expert, context, documentId, isIndirectInvocation) {
         let prompt = `You are ${expert.name} ${expert.icon}\n\n`;
         prompt += expert.systemPrompt + '\n\n';
-        const chatSystemPrompt = await this.settingsProvider.getChatSystemPrompt();
+        const chatSystemPrompt = await this.settingsProvider.getSetting('chat_system_prompt');
         if (chatSystemPrompt) {
             prompt += chatSystemPrompt + '\n\n';
         }

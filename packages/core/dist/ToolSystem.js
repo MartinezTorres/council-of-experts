@@ -184,9 +184,9 @@ export class ToolSystem {
                 const systemPrompt = 'You are an expert document analyst. Answer questions about documents concisely and accurately.';
                 const userPrompt = `Document content:\n\n${fileContents}\n\nQuestion: ${args.question}\n\nProvide a clear answer:`;
                 try {
-                    const chatSystemPrompt = await this.settingsProvider.getChatSystemPrompt();
-                    const config = await this.settingsProvider.getSummarizationConfig();
-                    const modelName = config?.model || 'default';
+                    const chatSystemPrompt = await this.settingsProvider.getSetting('chat_system_prompt');
+                    const summarizationModel = await this.settingsProvider.getSetting('summarization_model');
+                    const modelName = summarizationModel || 'default';
                     const response = await this.aiClient.chat(userPrompt, modelName, 0.3, ANALYSIS_MAX_TOKENS, chatSystemPrompt || systemPrompt);
                     return {
                         tool: 'analyze_attachment',
