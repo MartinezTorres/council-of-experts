@@ -2,13 +2,18 @@
  * Utility functions
  */
 
+import crypto from 'crypto';
 import type { OpenAIFunction, Tool } from './types.js';
 
 /**
  * Remove thinking tags from AI responses
+ * Supports both <think> and <thinking> tags
  */
 export function removeThinkingTags(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .trim();
 }
 
 /**
@@ -53,7 +58,6 @@ export function estimateTokens(text: string): number {
  * Generate cache key from content
  */
 export function generateCacheKey(...parts: string[]): string {
-  const crypto = require('crypto');
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
 }
 

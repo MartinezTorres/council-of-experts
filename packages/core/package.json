@@ -7,8 +7,6 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "node --test",
-    "test:watch": "node --test --watch",
     "clean": "rm -rf dist"
   },
   "keywords": [
@@ -36,9 +34,9 @@
     "url": "https://github.com/your-org/council-of-experts/issues"
   },
   "homepage": "https://github.com/your-org/council-of-experts#readme",
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^20.10.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },
   "engines": {
