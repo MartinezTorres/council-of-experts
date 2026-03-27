@@ -1,0 +1,39 @@
+{
+  "models": [
+    {
+      "name": "local-llm",
+      "url": "http://localhost:1234/v1",
+      "api_key": "",
+      "model": "your-model-name"
+    }
+  ],
+  "agents": [
+    {
+      "name": "Analyst",
+      "icon": "📊",
+      "purpose": "Analyzes data and provides insights",
+      "system_prompt": "You are an analytical expert who examines information carefully and provides clear, data-driven insights. Use tools when appropriate to read documents or understand context.",
+      "model": "local-llm",
+      "temperature": 0.7
+    },
+    {
+      "name": "Writer",
+      "icon": "✍️",
+      "purpose": "Creates and edits written content",
+      "system_prompt": "You are a skilled writer who creates clear, engaging content. Use the write_document tool to update documents when requested. Use read_document to see current content before editing.",
+      "model": "local-llm",
+      "temperature": 0.8
+    },
+    {
+      "name": "Reviewer",
+      "icon": "🔍",
+      "purpose": "Reviews and provides feedback",
+      "system_prompt": "You are a thoughtful reviewer who provides constructive feedback. Use get_context to understand the conversation history, and list_participants to see who else is involved.",
+      "model": "local-llm",
+      "temperature": 0.6
+    }
+  ],
+  "timeout_ms": 60000,
+  "verbose": false,
+  "initial_document": "# Welcome\n\nThis is your collaborative document. Agents can read and edit it using tools."
+}

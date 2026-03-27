@@ -1,0 +1,35 @@
+{
+  "name": "@council-of-experts/cli",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Interactive CLI chat interface for council-of-experts",
+  "main": "dist/index.js",
+  "bin": {
+    "council": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "council-of-experts": "file:../core"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "tsx": "^4.6.2",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "ai-agents",
+    "multi-agent",
+    "orchestration",
+    "cli",
+    "chat"
+  ],
+  "author": "Council of Experts",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
