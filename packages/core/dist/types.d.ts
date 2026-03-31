@@ -1,175 +1,235 @@
 /**
- * Type definitions for council-of-experts
- * A role-agnostic AI agent orchestration library
+ * council-of-experts contract types
+ * Based on contract version 1
  */
-/**
- * Document provider - implements document/resource access
- * Consumer must implement this to connect council to their data
- */
-export interface DocumentProvider {
-    getDocument(id: string): Promise<Document>;
-    createSuggestion(documentId: string, content: string, baseVersion: number, userId: string): Promise<SuggestionResult>;
-    getAttachment(documentId: string, attachmentId: string): Promise<Attachment | null>;
-}
-/**
- * Settings provider - implements configuration access
- * Generic key-value interface for maximum flexibility
- */
-export interface SettingsProvider {
-    getModel(modelName: string): Promise<AIModel | null>;
-    getSetting<T>(key: string, defaultValue?: T): Promise<T>;
-}
-/**
- * Logger provider - implements logging
- */
-export interface LoggerProvider {
-    logOperation(operation: string, userId: string, metadata?: any): Promise<void>;
-    logError(operation: string, error: Error): Promise<void>;
-}
-/**
- * Event broadcaster - optional, for real-time updates
- */
-export interface EventBroadcaster {
-    emit(room: string, event: string, data: any): void;
-}
-export interface Document {
+export declare const COUNCIL_CONTRACT_VERSION: 1;
+export type CouncilMode = 'open' | 'council' | 'oracle';
+export interface EngineSpec {
     id: string;
-    content: string;
-    version?: number;
-    attachments?: Attachment[];
+    provider?: string;
+    model: string;
+    contextWindow: number;
+    settings?: Record<string, unknown>;
 }
-export interface Attachment {
+export interface AgentDefinition {
     id: string;
-    type: string;
-    description?: string;
-    files: AttachmentFile[];
-}
-export interface AttachmentFile {
-    id: string;
-    filename: string;
-    mime_type: string;
-    size: number;
-    data?: Buffer;
-}
-export interface SuggestionResult {
-    id: string;
-    created_by: string;
-    created_at: string;
-    base_version: number;
-}
-export interface AIModel {
     name: string;
-    url: string;
-    model: string;
-    api_key: string;
+    engine: EngineSpec;
+    modelName: string;
+    summary: string;
+    systemPrompt: string;
+    tools?: string[];
+    metadata?: Record<string, unknown>;
 }
-export interface SummarizationConfig {
-    model: string;
-    promptTemplate?: string;
+export interface OpenCouncilInput {
+    councilId: string;
+    initialMode?: CouncilMode;
+    metadata?: Record<string, unknown>;
 }
-export interface AIResponse {
+export interface ChatEvent {
+    id?: string;
+    actor: {
+        type: 'user' | 'agent' | 'system';
+        id: string;
+        name?: string;
+    };
     content: string;
-    toolCalls?: ToolCall[];
-    diagnosticId?: string;
+    timestamp?: string | number | Date;
+    metadata?: Record<string, unknown>;
+}
+export interface CouncilMessage {
+    id: string;
+    turnId: string;
+    author: {
+        type: 'agent' | 'oracle' | 'system';
+        id: string;
+        name: string;
+    };
+    visibility: 'public' | 'private';
+    content: string;
+    timestamp: string;
+    metadata?: Record<string, unknown>;
 }
 export interface ToolCall {
     name: string;
-    arguments: Record<string, any>;
-}
-export interface Expert {
-    name: string;
-    icon: string;
-    systemPrompt: string;
-    model: string;
-    temperature: number;
-    userId: string;
-}
-export interface ExpertResponse {
-    expertUserId: string;
-    message: string;
-    timestamp: string;
-    diagnosticId?: string;
-}
-export interface Tool {
-    name: string;
-    description: string;
-    parameters: Record<string, ToolParameter>;
-    needsProcessing: boolean;
-}
-export interface ToolParameter {
-    type: 'string' | 'number' | 'boolean';
-    description: string;
-    required?: boolean;
-}
-export interface ToolExecutionContext {
-    documentId: string;
-    expertUserId: string;
-    triggerUserId: string;
+    args?: Record<string, unknown>;
 }
 export interface ToolResult {
-    tool: string;
-    result: string;
-    success: boolean;
-}
-export type ToolExecutor = (args: Record<string, any>, context: ToolExecutionContext) => Promise<ToolResult>;
-export interface OpenAIFunction {
-    type: 'function';
-    function: {
-        name: string;
-        description: string;
-        parameters: {
-            type: 'object';
-            properties: Record<string, {
-                type: string;
-                description: string;
-            }>;
-            required: string[];
-        };
-    };
-}
-export interface OpenAIMessage {
-    role: 'system' | 'user' | 'assistant';
-    content: string | null;
-    tool_calls?: OpenAIToolCall[];
-}
-export interface OpenAIToolCall {
-    id?: string;
-    type: 'function';
-    function: {
-        name: string;
-        arguments: string;
-    };
-}
-export interface Diagnostic {
-    id: string;
-    timestamp: string;
-    modelName: string;
-    modelUrl: string;
-    request: {
-        prompt: string;
-        systemPrompt?: string;
-        temperature: number;
-        maxTokens: number;
-    };
-    response: {
-        content: string;
-        finishReason?: string;
-    };
-    performance: {
-        responseTimeMs: number;
-        tokensPerSecond?: number;
-    };
-    usage?: {
-        promptTokens?: number;
-        completionTokens?: number;
-        totalTokens?: number;
-    };
+    ok: boolean;
+    content?: string;
+    data?: unknown;
     error?: string;
 }
-export interface CouncilConfig {
-    documentProvider: DocumentProvider;
-    settingsProvider: SettingsProvider;
-    loggerProvider?: LoggerProvider;
-    broadcaster?: EventBroadcaster;
+export interface ToolExecutionContext {
+    councilId: string;
+    turnId: string;
+    agentId: string;
+}
+export interface ToolHost {
+    execute(call: ToolCall, ctx: ToolExecutionContext): Promise<ToolResult>;
+}
+export interface EngineInput {
+    councilId: string;
+    turnId: string;
+    agent: AgentDefinition;
+    mode: CouncilMode;
+    event: ChatEvent;
+    history: CouncilMessage[];
+}
+export interface EngineOutput {
+    content: string;
+    metadata?: Record<string, unknown>;
+}
+export interface EngineAdapter {
+    generate(input: EngineInput): Promise<EngineOutput>;
+    stream?(input: EngineInput): AsyncIterable<EngineOutput>;
+}
+export interface CouncilModuleConfig {
+    agents: AgentDefinition[];
+    engines: Record<string, EngineAdapter>;
+    toolHost?: ToolHost;
+}
+export interface TurnOptions {
+    mode?: CouncilMode;
+    maxRounds?: number;
+    maxAgentReplies?: number;
+    trace?: boolean;
+}
+export type CouncilRecord = {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'mode.changed';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    from: CouncilMode;
+    to: CouncilMode;
+} | {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'message.emitted';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    message: CouncilMessage;
+} | {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'tool.called';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    agentId: string;
+    callId: string;
+    call: ToolCall;
+} | {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'tool.result';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    agentId: string;
+    callId: string;
+    result: ToolResult;
+} | {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'turn.completed';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    mode: CouncilMode;
+};
+export type CouncilReplayEntry = {
+    type: 'host.chat';
+    event: ChatEvent;
+} | {
+    type: 'council.record';
+    record: CouncilRecord;
+};
+export interface TurnResult {
+    turnId: string;
+    mode: CouncilMode;
+    nextMode?: CouncilMode;
+    publicMessages: CouncilMessage[];
+    privateMessages: CouncilMessage[];
+    records: CouncilRecord[];
+}
+export type CouncilRuntimeEvent = {
+    type: 'turn.started';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    mode: CouncilMode;
+} | {
+    type: 'agent.started';
+    councilId: string;
+    turnId: string;
+    agentId: string;
+    timestamp: string;
+} | {
+    type: 'agent.finished';
+    councilId: string;
+    turnId: string;
+    agentId: string;
+    timestamp: string;
+} | {
+    type: 'message.emitted';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    message: CouncilMessage;
+} | {
+    type: 'tool.called';
+    councilId: string;
+    turnId: string;
+    agentId: string;
+    timestamp: string;
+    callId: string;
+    call: ToolCall;
+} | {
+    type: 'tool.result';
+    councilId: string;
+    turnId: string;
+    agentId: string;
+    timestamp: string;
+    callId: string;
+    result: ToolResult;
+} | {
+    type: 'mode.changed';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    from: CouncilMode;
+    to: CouncilMode;
+} | {
+    type: 'turn.completed';
+    councilId: string;
+    turnId: string;
+    timestamp: string;
+    mode: CouncilMode;
+} | {
+    type: 'error';
+    councilId: string;
+    turnId?: string;
+    agentId?: string;
+    timestamp: string;
+    error: {
+        message: string;
+        code?: string;
+        data?: unknown;
+    };
+};
+export interface Council {
+    getMode(): CouncilMode;
+    replay(entries: Iterable<CouncilReplayEntry> | AsyncIterable<CouncilReplayEntry>): Promise<void>;
+    post(event: ChatEvent, options?: TurnOptions): Promise<TurnResult>;
+    stream(event: ChatEvent, options?: TurnOptions): AsyncIterable<CouncilRuntimeEvent>;
+    getMessages(options?: {
+        visibility?: 'public' | 'private' | 'all';
+        limit?: number;
+    }): Promise<CouncilMessage[]>;
+    getStatus(): Promise<unknown>;
+    dispose(): Promise<void>;
+}
+export interface CouncilModule {
+    openCouncil(input: OpenCouncilInput): Promise<Council>;
+    listAgents(): AgentDefinition[];
 }
 //# sourceMappingURL=types.d.ts.map

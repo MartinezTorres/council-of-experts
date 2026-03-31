@@ -2,22 +2,46 @@
  * Configuration loading for CLI
  */
 
-import type { AIModel } from 'council-of-experts';
+import type { AgentDefinition, EngineSpec } from 'council-of-experts';
 import { readFileSync } from 'fs';
 
-export interface AgentConfig {
-  name: string;
-  icon: string;
-  purpose: string;
-  system_prompt: string;
+/**
+ * Engine configuration (maps to EngineSpec in contract)
+ */
+export interface EngineConfig {
+  id: string;
+  provider?: string;
   model: string;
-  temperature: number;
+  contextWindow: number;
+  settings?: {
+    api_key?: string;
+    temperature?: number;
+    [key: string]: unknown;
+  };
 }
 
+/**
+ * Agent configuration (maps to AgentDefinition in contract)
+ */
+export interface AgentConfig {
+  id: string;
+  name: string;
+  icon: string;
+  engine: string; // Reference to engine by ID
+  summary: string;
+  systemPrompt: string;
+  tools?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * CLI-specific configuration
+ */
 export interface CLIConfig {
-  models: AIModel[];
+  engines: EngineConfig[];
   agents: AgentConfig[];
   timeout_ms?: number;
+  max_tokens?: number;
   verbose?: boolean;
   initial_document?: string;
 }
@@ -31,8 +55,8 @@ export function loadConfig(configPath: string): CLIConfig {
     const config = JSON.parse(content) as CLIConfig;
 
     // Validate required fields
-    if (!config.models || config.models.length === 0) {
-      throw new Error('Config must contain at least one model');
+    if (!config.engines || config.engines.length === 0) {
+      throw new Error('Config must contain at least one engine');
     }
     if (!config.agents || config.agents.length === 0) {
       throw new Error('Config must contain at least one agent');
@@ -52,4 +76,40 @@ export function loadConfig(configPath: string): CLIConfig {
  */
 export function getDefaultConfigPath(): string {
   return process.env.COUNCIL_CONFIG || './config.json';
+}
+
+/**
+ * Convert CLI config to contract types
+ */
+export function buildAgentDefinitions(config: CLIConfig): AgentDefinition[] {
+  const engineMap = new Map(config.engines.map((e) => [e.id, e]));
+
+  return config.agents.map((agent) => {
+    const engineConfig = engineMap.get(agent.engine);
+    if (!engineConfig) {
+      throw new Error(`Engine '${agent.engine}' not found for agent ${agent.name}`);
+    }
+
+    const engineSpec: EngineSpec = {
+      id: engineConfig.id,
+      provider: engineConfig.provider,
+      model: engineConfig.model,
+      contextWindow: engineConfig.contextWindow,
+      settings: engineConfig.settings,
+    };
+
+    return {
+      id: agent.id,
+      name: agent.name,
+      engine: engineSpec,
+      modelName: engineConfig.model,
+      summary: agent.summary,
+      systemPrompt: agent.systemPrompt,
+      tools: agent.tools,
+      metadata: {
+        ...agent.metadata,
+        icon: agent.icon,
+      },
+    };
+  });
 }

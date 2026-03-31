@@ -3,25 +3,23 @@
  */
 
 import * as readline from 'readline';
-import type { CouncilOrchestrator, Expert } from 'council-of-experts';
-import { parseMentions } from 'council-of-experts';
-import type { ChatHistory } from './providers.js';
-import type { AgentConfig } from './config.js';
+import type { Council, ChatEvent, AgentDefinition } from 'council-of-experts';
+import type { ChatHistory } from './tools.js';
 
 export class ChatLoop {
   private rl: readline.Interface;
   private running: boolean = false;
+  private councilId: string = 'cli-session';
 
   constructor(
-    private council: CouncilOrchestrator,
+    private council: Council,
     private chatHistory: ChatHistory,
-    private agents: Map<string, AgentConfig>,
-    private documentId: string = 'main'
+    private agents: AgentDefinition[]
   ) {
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
-      prompt: '> '
+      prompt: '> ',
     });
   }
 
@@ -31,16 +29,19 @@ export class ChatLoop {
     console.log('\n╔══════════════════════════════════════════════════════╗');
     console.log('║       Council of Experts - Interactive CLI          ║');
     console.log('╚══════════════════════════════════════════════════════╝\n');
-    console.log('Agents available:');
-    for (const agent of this.agents.values()) {
-      console.log(`  ${agent.icon} ${agent.name} - ${agent.purpose}`);
+    console.log(`Mode: ${this.council.getMode()}`);
+    console.log('\nAgents available:');
+    for (const agent of this.agents) {
+      const icon = agent.metadata?.icon as string || '🤖';
+      console.log(`  ${icon} ${agent.name} - ${agent.summary}`);
     }
     console.log('\nCommands:');
-    console.log('  @AgentName message    - Mention an agent');
-    console.log('  /doc                  - View current document');
-    console.log('  /clear                - Clear conversation history');
-    console.log('  /help                 - Show this help');
-    console.log('  /quit                 - Exit\n');
+    console.log('  /mode <open|council|oracle>  - Change council mode');
+    console.log('  /status                       - View council status');
+    console.log('  /messages [public|private]    - View messages');
+    console.log('  /clear                        - Clear conversation history');
+    console.log('  /help                         - Show this help');
+    console.log('  /quit                         - Exit\n');
 
     this.rl.prompt();
 
@@ -72,7 +73,8 @@ export class ChatLoop {
   }
 
   private async handleCommand(command: string): Promise<void> {
-    const cmd = command.toLowerCase();
+    const parts = command.toLowerCase().split(/\s+/);
+    const cmd = parts[0];
 
     if (cmd === '/quit' || cmd === '/exit') {
       this.rl.close();
@@ -81,20 +83,48 @@ export class ChatLoop {
 
     if (cmd === '/help') {
       console.log('\nCommands:');
-      console.log('  @AgentName message    - Mention an agent to invoke them');
-      console.log('  /doc                  - View current document');
-      console.log('  /clear                - Clear conversation history');
-      console.log('  /help                 - Show this help');
-      console.log('  /quit                 - Exit');
+      console.log('  /mode <open|council|oracle>  - Change council mode');
+      console.log('  /status                       - View council status');
+      console.log('  /messages [public|private]    - View messages');
+      console.log('  /clear                        - Clear conversation history');
+      console.log('  /help                         - Show this help');
+      console.log('  /quit                         - Exit');
       return;
     }
 
-    if (cmd === '/doc') {
-      const doc = await this.council['documentProvider'].getDocument(this.documentId);
+    if (cmd === '/mode') {
+      const newMode = parts[1];
+      if (newMode !== 'open' && newMode !== 'council' && newMode !== 'oracle') {
+        console.log('Invalid mode. Use: open, council, or oracle');
+        return;
+      }
+      console.log(`Mode will change to '${newMode}' on next message.`);
+      return;
+    }
+
+    if (cmd === '/status') {
+      const status = await this.council.getStatus();
       console.log('\n' + '='.repeat(60));
-      console.log('CURRENT DOCUMENT:');
+      console.log('COUNCIL STATUS:');
       console.log('='.repeat(60));
-      console.log(doc.content || '(empty)');
+      console.log(JSON.stringify(status, null, 2));
+      console.log('='.repeat(60) + '\n');
+      return;
+    }
+
+    if (cmd === '/messages') {
+      const visibility = parts[1] as 'public' | 'private' | undefined;
+      const messages = await this.council.getMessages({
+        visibility: visibility || 'all',
+      });
+      console.log('\n' + '='.repeat(60));
+      console.log(`MESSAGES (${visibility || 'all'}):`);
+      console.log('='.repeat(60));
+      for (const msg of messages) {
+        console.log(
+          `[${msg.visibility}] ${msg.author.name}: ${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}`
+        );
+      }
       console.log('='.repeat(60) + '\n');
       return;
     }
@@ -112,79 +142,60 @@ export class ChatLoop {
     // Add user message to history
     this.chatHistory.addMessage('user', 'User', message);
 
-    // Parse mentions
-    const mentions = parseMentions(message);
-
-    if (mentions.size === 0) {
-      console.log('(No agents mentioned. Use @AgentName to invoke agents)');
-      return;
-    }
-
-    // Find mentioned agents
-    const mentionedAgents: Expert[] = [];
-    for (const mention of mentions) {
-      for (const [userId, agentConfig] of this.agents.entries()) {
-        if (agentConfig.name.toLowerCase() === mention.toLowerCase()) {
-          mentionedAgents.push({
-            userId,
-            name: agentConfig.name,
-            icon: agentConfig.icon,
-            systemPrompt: agentConfig.system_prompt,
-            model: agentConfig.model,
-            temperature: agentConfig.temperature
-          });
-          break;
-        }
-      }
-    }
-
-    if (mentionedAgents.length === 0) {
-      console.log('(No matching agents found)');
-      return;
-    }
-
-    console.log(`Invoking: ${mentionedAgents.map(a => `${a.icon} ${a.name}`).join(', ')}...\n`);
-
-    // Set up response handler to display agent messages
-    const responseHandler = async (response: any) => {
-      const agentConfig = this.agents.get(response.expertUserId);
-      if (agentConfig) {
-        console.log(`\n${agentConfig.icon} ${agentConfig.name}:`);
-        console.log(response.message);
-        console.log('');
-
-        // Add to history
-        this.chatHistory.addMessage('agent', agentConfig.name, response.message);
-      }
+    // Create chat event
+    const event: ChatEvent = {
+      actor: {
+        type: 'user',
+        id: 'cli-user',
+        name: 'User',
+      },
+      content: message,
+      timestamp: new Date().toISOString(),
     };
 
-    // Temporarily set response handler
-    const originalHandler = (this.council as any).responseCallback;
-    this.council.onResponse(responseHandler);
+    console.log(`\nProcessing in ${this.council.getMode()} mode...\n`);
 
     try {
-      // Get chat context
-      const chatContext = this.chatHistory.getFormattedHistory(10);
-      const doc = await this.council['documentProvider'].getDocument(this.documentId);
+      // Call council.post
+      const result = await this.council.post(event);
 
-      // Orchestrate
-      await this.council.orchestrate(
-        this.documentId,
-        message,
-        'user',
-        mentionedAgents,
-        {
-          documentContent: doc.content,
-          chatHistory: chatContext
+      // Display public messages
+      if (result.publicMessages.length > 0) {
+        console.log('=== Public Responses ===\n');
+        for (const msg of result.publicMessages) {
+          const agent = this.agents.find((a) => a.id === msg.author.id);
+          const icon = agent?.metadata?.icon as string || '🤖';
+          console.log(`${icon} ${msg.author.name}:`);
+          console.log(msg.content);
+          console.log('');
+
+          // Add to chat history
+          this.chatHistory.addMessage('agent', msg.author.name, msg.content);
         }
-      );
-    } catch (error) {
-      console.error('Error during orchestration:', (error as Error).message);
-    } finally {
-      // Restore original handler
-      if (originalHandler) {
-        this.council.onResponse(originalHandler);
       }
+
+      // Display private messages if any (for visibility)
+      if (result.privateMessages.length > 0) {
+        console.log('=== Private Deliberation (hidden from public) ===\n');
+        for (const msg of result.privateMessages) {
+          const agent = this.agents.find((a) => a.id === msg.author.id);
+          const icon = agent?.metadata?.icon as string || '🔒';
+          console.log(`${icon} ${msg.author.name} (private):`);
+          console.log(msg.content);
+          console.log('');
+        }
+      }
+
+      if (result.publicMessages.length === 0 && result.privateMessages.length === 0) {
+        console.log('(No responses from agents)');
+      }
+
+      // Show mode changes
+      if (result.nextMode && result.nextMode !== result.mode) {
+        console.log(`\n[Mode changed from ${result.mode} to ${result.nextMode}]`);
+      }
+    } catch (error) {
+      console.error('Error during council turn:', (error as Error).message);
     }
   }
 

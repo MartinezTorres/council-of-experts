@@ -1,13 +1,11 @@
 /**
- * Council of Experts - Public API
+ * council-of-experts - Multi-agent AI orchestration runtime
+ * Contract version 1
  */
-// Main class
-export { CouncilOrchestrator } from './CouncilOrchestrator.js';
-// Supporting classes
-export { AIClient } from './AIClient.js';
-export { ToolSystem } from './ToolSystem.js';
-// Utilities
-export { removeThinkingTags, toOpenAIFunction, estimateTokens, generateCacheKey, parseMentions, filterExpertsByMention, filterExpertsByRecentActivity } from './utils.js';
-// Constants
-export { DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS, AI_TIMEOUT_MS, SUMMARY_CACHE_MAX_SIZE, DIAGNOSTICS_MAX_PER_MODEL, CHARS_PER_TOKEN, LARGE_ATTACHMENT_THRESHOLD_TOKENS, ANALYSIS_MAX_TOKENS } from './constants.js';
+// Export constant
+export { COUNCIL_CONTRACT_VERSION } from './types.js';
+// Export factory function
+export { createCouncilModule } from './CouncilModule.js';
+// Export utility functions
+export { generateId, normalizeTimestamp } from './utils.js';
 //# sourceMappingURL=index.js.map

@@ -1,13 +1,33 @@
 # council-of-experts
 
-Multi-agent AI orchestration library with tool calling, parallel execution, and provider-based architecture.
+Multi-agent AI orchestration runtime with three operating modes, private deliberation, and event-sourced state management.
 
 ## What It Does
 
-- **Orchestrate multiple AI agents** in parallel responding to user messages
-- **Tool system** - Agents can call functions to read documents, analyze attachments, suggest edits
-- **Provider-based** - Bring your own storage, settings, and logging via clean interfaces
-- **OpenAI-compatible** - Works with any OpenAI-compatible API (local LLMs, cloud providers)
+- **Three Operating Modes** - `open` (independent responses), `council` (private deliberation → public synthesis), `oracle` (private deliberation → unified voice)
+- **Private/Public Channels** - Agents can deliberate privately before emitting public responses
+- **Event-Sourced** - Pure replay from persisted records, no file system dependencies
+- **Turn-Based API** - Clean separation of durable records vs diagnostic data
+- **Host-Owned Persistence** - Core module is 100% in-memory, host owns all storage
+- **EngineAdapter Pattern** - Bring your own AI provider implementation
+
+## Architecture
+
+See **[docs/council-of-experts-contract.md](./docs/council-of-experts-contract.md)** for the complete specification.
+
+### Key Concepts
+
+**Council**: In-memory runtime instance identified by a `councilId`
+
+**Operating Modes**:
+- `open` - Agents speak independently in public
+- `council` - Agents deliberate privately, then emit public messages
+- `oracle` - Agents deliberate privately, oracle synthesizes unified response
+
+**Durability Model**:
+- Core module never touches files or databases
+- Returns `CouncilRecord[]` to persist after each turn
+- Pure replay reconstructs state from records
 
 ## Installation
 
@@ -18,319 +38,272 @@ npm install council-of-experts
 ## Quick Start
 
 ```typescript
-import { CouncilOrchestrator } from 'council-of-experts';
+import { createCouncilModule } from 'council-of-experts';
+import type {
+  AgentDefinition,
+  EngineAdapter,
+  ToolHost,
+  CouncilModuleConfig
+} from 'council-of-experts';
 
-// 1. Implement providers (or use examples from packages/cli)
-const council = new CouncilOrchestrator({
-  documentProvider: new MyDocumentProvider(),
-  settingsProvider: new MySettingsProvider(),
-  loggerProvider: new MyLogger(),
-  broadcaster: new MyBroadcaster() // optional
-});
-
-// 2. Define experts
-const experts = [
+// 1. Define agents
+const agents: AgentDefinition[] = [
   {
-    userId: 'agent-1',
+    id: 'analyst',
     name: 'Analyst',
-    icon: '📊',
-    systemPrompt: 'You analyze data and provide insights.',
-    model: 'gpt-4',
-    temperature: 0.7
-  },
-  {
-    userId: 'agent-2',
-    name: 'Writer',
-    icon: '✍️',
-    systemPrompt: 'You write and edit content clearly.',
-    model: 'gpt-4',
-    temperature: 0.8
+    engine: {
+      id: 'local',
+      provider: 'http://localhost:1234',
+      model: 'your-model-name',
+      contextWindow: 8192,
+    },
+    modelName: 'your-model-name',
+    summary: 'Data analysis expert',
+    systemPrompt: 'You are an analytical expert...',
+    metadata: { icon: '📊' }
   }
 ];
 
-// 3. Register custom tools (optional)
-council.registerTool(
-  {
-    name: 'search_web',
-    description: 'Search the web for information',
-    parameters: {
-      query: { type: 'string', description: 'Search query', required: true }
-    },
-    needsProcessing: true // Agent sees result
-  },
-  async (args, context) => {
-    const results = await mySearchAPI(args.query);
-    return {
-      tool: 'search_web',
-      result: results,
-      success: true
-    };
-  }
-);
+// 2. Implement EngineAdapter (example: /v1/chat/completions compatible)
+class ChatCompletionsEngine implements EngineAdapter {
+  async generate(input: EngineInput): Promise<EngineOutput> {
+    const response = await fetch(`${input.agent.engine.provider}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: input.agent.engine.model,
+        messages: [
+          { role: 'system', content: input.agent.systemPrompt },
+          { role: 'user', content: input.event.content }
+        ]
+      })
+    });
 
-// 4. Orchestrate agents
-await council.orchestrate(
-  'document-123',           // Document ID
-  '@Analyst what trends do you see?',  // User message
-  'user-456',              // User ID
-  experts,                 // Experts to invoke
-  {
-    documentContent: 'Q2 2024 Revenue: $5.2M (+15% YoY)...',
-    chatHistory: 'Previous messages...'
+    const data = await response.json();
+    return { content: data.choices[0].message.content };
   }
-);
+}
 
-// 5. Handle responses
-council.onResponse(async (response, documentId) => {
-  console.log(`${response.expertUserId}: ${response.message}`);
-  // Save to database, broadcast via WebSocket, etc.
+// 3. Implement ToolHost (optional)
+const toolHost: ToolHost = {
+  async execute(call, ctx) {
+    if (call.name === 'read_document') {
+      const doc = await yourDocStore.get(ctx.councilId);
+      return { ok: true, content: doc };
+    }
+    return { ok: false, error: 'Unknown tool' };
+  }
+};
+
+// 4. Create council module
+const councilModule = createCouncilModule({
+  agents,
+  engines: { 'local': new ChatCompletionsEngine() },
+  toolHost
 });
-```
 
-## Architecture
+// 5. Open council and post events
+const council = await councilModule.openCouncil({
+  councilId: 'session-123',
+  initialMode: 'open'
+});
 
-### Provider Interfaces
+const result = await council.post({
+  actor: { type: 'user', id: 'user-1', name: 'Alice' },
+  content: 'Analyze this data'
+});
 
-Implement these to connect council-of-experts to your application:
+// 6. Persist records
+await yourStorage.append(result.records);
 
-```typescript
-interface DocumentProvider {
-  getDocument(id: string): Promise<Document>;
-  createSuggestion(documentId, content, baseVersion, userId): Promise<SuggestionResult>;
-  getAttachment(documentId, attachmentId): Promise<Attachment | null>;
-}
-
-interface SettingsProvider {
-  getModel(modelName: string): Promise<AIModel | null>;
-  getSetting<T>(key: string, defaultValue?: T): Promise<T>;
-}
-
-interface LoggerProvider {
-  logOperation(operation: string, userId: string, metadata?: any): Promise<void>;
-  logError(operation: string, error: Error): Promise<void>;
-}
-
-interface EventBroadcaster {
-  emit(room: string, event: string, data: any): void;
+// 7. Display responses
+for (const msg of result.publicMessages) {
+  console.log(`${msg.author.name}: ${msg.content}`);
 }
 ```
 
-### Built-in Tools
+## Operating Modes
 
-Agents automatically have access to:
-
-- `get_attachment` - Read attachment content
-- `list_attachments` - List available attachments
-- `suggest_edit` - Suggest document edits
-- `analyze_attachment` - AI-powered attachment analysis
-
-### Custom Tools
-
-Register your own tools:
-
+### Open Mode
 ```typescript
-council.registerTool(tool, executor);
+const result = await council.post(event, { mode: 'open' });
+// All agents respond independently in public
 ```
 
-Tools can either:
-- **Need processing** (`needsProcessing: true`) - Agent sees the result and responds
-- **Fire and forget** (`needsProcessing: false`) - Result stored, no follow-up
-
-## Utilities
-
-### Mention Parsing
-
+### Council Mode
 ```typescript
-import { parseMentions, filterExpertsByMention } from 'council-of-experts';
-
-const mentions = parseMentions('@Analyst and @Writer, help me');
-// Returns: Set { 'analyst', 'writer' }
-
-const invoked = filterExpertsByMention(allExperts, mentions);
+const result = await council.post(event, { mode: 'council' });
+// Phase 1: Private deliberation
+// Phase 2: Public synthesis based on private thoughts
+console.log(result.privateMessages); // Hidden deliberation
+console.log(result.publicMessages);  // Public synthesis
 ```
 
-### Recent Activity Detection
-
+### Oracle Mode
 ```typescript
-import { filterExpertsByRecentActivity } from 'council-of-experts';
-
-const activeExperts = filterExpertsByRecentActivity(
-  allExperts,
-  recentMessages,
-  10 // lookback count
-);
+const result = await council.post(event, { mode: 'oracle' });
+// Phase 1: Private agent deliberation
+// Phase 2: Unified oracle response
+// result.publicMessages contains single oracle message
 ```
 
-### Model Discovery & Testing
+## Replay and Durability
 
 ```typescript
-// Discover models from provider
-const models = await council.aiClient.discoverModels(
-  'http://localhost:1234/v1',
-  'api-key'
-);
+// On application boot
+const council = await councilModule.openCouncil({ councilId: 'idea-456' });
 
-// Test connection
-const result = await council.aiClient.testConnection('model-name');
+// Replay persisted history
+const entries = await yourStorage.load('idea-456');
+await council.replay(entries); // Pure state reconstruction, no LLM calls
 
-// Test tool support
-const toolSupport = await council.aiClient.testToolSupport('model-name');
+// Process new event
+const result = await council.post(userEvent);
+
+// Persist returned records
+await yourStorage.append('idea-456', result.records);
+```
+
+## Streaming API
+
+```typescript
+for await (const event of council.stream(chatEvent)) {
+  switch (event.type) {
+    case 'turn.started':
+      console.log('Turn started');
+      break;
+    case 'agent.started':
+      console.log(`Agent ${event.agentId} thinking...`);
+      break;
+    case 'message.emitted':
+      console.log(`${event.message.author.name}: ${event.message.content}`);
+      break;
+  }
+}
+```
+
+## Inspecting Private Channel
+
+```typescript
+// Get all messages (public and private)
+const allMessages = await council.getMessages({ visibility: 'all' });
+
+// Get only private deliberation
+const privateMessages = await council.getMessages({ visibility: 'private' });
+
+// Get diagnostic snapshot (unstable across versions)
+const status = await council.getStatus();
+console.log(status);
+```
+
+## API Reference
+
+### createCouncilModule(config)
+
+Creates a council module.
+
+**Config:**
+- `agents: AgentDefinition[]` - Agent definitions
+- `engines: Record<string, EngineAdapter>` - Engine implementations
+- `toolHost?: ToolHost` - Optional tool executor
+
+**Returns:** `CouncilModule`
+
+### CouncilModule
+
+- `openCouncil(input)` - Create in-memory council instance
+- `listAgents()` - Get all agent definitions
+
+### Council
+
+- `getMode()` - Get current mode
+- `replay(entries)` - Replay persisted records (pure state reconstruction)
+- `post(event, options?)` - Process turn, returns `TurnResult`
+- `stream(event, options?)` - Stream turn execution events
+- `getMessages(options?)` - Get message history
+- `getStatus()` - Get diagnostic snapshot (unstable)
+- `dispose()` - Release in-memory resources
+
+### TurnResult
+
+```typescript
+interface TurnResult {
+  turnId: string;
+  mode: CouncilMode;
+  publicMessages: CouncilMessage[];
+  privateMessages: CouncilMessage[];
+  records: CouncilRecord[];  // PERSIST THESE
+}
 ```
 
 ## Example Application
 
-See **[packages/cli](./packages/cli)** for a complete working example:
-
-- In-memory providers
-- Interactive chat interface
-- Basic tools (read/write document, introspection)
-- Configuration via JSON
+See **[packages/cli](./packages/cli)** for a complete working CLI:
 
 ```bash
 cd packages/cli
 npm install
-npm run dev
+npm run build
+npm start config.example.json
 ```
 
-## Configuration
+## Configuration Example
 
-### Standard Settings Keys
-
-The library uses these standard keys via `SettingsProvider.getSetting()`:
-
-- `ai_timeout_ms` - API timeout (default: 60000)
-- `summarization_model` - Model for summarization
-- `summarization_prompt_template` - Custom prompt template
-- `chat_system_prompt` - Global system prompt
-
-Your provider can support additional keys as needed.
-
-### AI Models
-
-Models must be OpenAI-compatible. Configure via `SettingsProvider.getModel()`:
-
-```typescript
+```json
 {
-  name: 'local-llm',
-  url: 'http://localhost:1234/v1',
-  api_key: '',
-  model: 'model-id'
+  "engines": [{
+    "id": "local-llm",
+    "provider": "http://localhost:1234",
+    "model": "your-model-name",
+    "contextWindow": 8192,
+    "settings": { "temperature": 0.7 }
+  }],
+  "agents": [{
+    "id": "analyst",
+    "name": "Analyst",
+    "icon": "📊",
+    "engine": "local-llm",
+    "summary": "Data analysis expert",
+    "systemPrompt": "You are an expert...",
+    "tools": ["read_document"]
+  }]
 }
 ```
 
-## How It Works
+## Contract Stability
 
-1. **User sends message** mentioning agents
-2. **Orchestrator** invokes mentioned agents in parallel
-3. **Each agent** gets system prompt + context + tools
-4. **Agents respond** via AI API, optionally calling tools
-5. **Tool results** fed back to agent for final response
-6. **Responses** sent via callback to your application
+**Stable (replayable across versions):**
+- TypeScript API
+- `CouncilRecord` types
+- `CouncilReplayEntry` types
+- Replay semantics
 
-### Direct vs Indirect Invocation
-
-- **Direct** - Agent is `@mentioned` explicitly → must respond
-- **Indirect** - Agent recently active but not mentioned → can respond or "SKIP"
-
-## Diagnostics
-
-Track AI API performance:
-
-```typescript
-// Get diagnostic by ID (from response)
-const diagnostic = council.getDiagnostic(diagnosticId);
-
-// Get all diagnostics for a model
-const diagnostics = council.getModelDiagnostics('gpt-4');
-```
-
-Diagnostics include:
-- Request/response content
-- Token usage
-- Response time
-- Tokens per second
-- Error messages
-
-## API Reference
-
-### CouncilOrchestrator
-
-```typescript
-class CouncilOrchestrator {
-  constructor(config: CouncilConfig)
-
-  // Orchestrate agents
-  orchestrate(
-    documentId: string,
-    userMessage: string,
-    triggerUserId: string,
-    experts: Expert[],
-    context: { documentContent?, chatHistory? },
-    options?: { isIndirectInvocation? }
-  ): Promise<void>
-
-  // Register tools
-  registerTool(tool: Tool, executor: ToolExecutor): void
-
-  // Set response callback
-  onResponse(callback: (response, documentId) => Promise<void>): void
-
-  // Diagnostics
-  getDiagnostic(id: string): Diagnostic | undefined
-  getModelDiagnostics(modelName: string): Diagnostic[]
-
-  // Summarization
-  summarize(text: string): Promise<string>
-
-  // Direct access
-  aiClient: AIClient
-}
-```
-
-### AIClient
-
-```typescript
-class AIClient {
-  // Chat with model
-  chat(
-    prompt: string,
-    modelName: string,
-    temperature: number,
-    maxTokens?: number,
-    systemPrompt?: string,
-    tools?: OpenAIFunction[]
-  ): Promise<AIResponse>
-
-  // Model operations
-  discoverModels(url, apiKey?, timeoutMs?): Promise<ModelInfo[]>
-  testConnection(modelName): Promise<TestResult>
-  testToolSupport(modelName): Promise<ToolSupportResult>
-
-  // Summarization
-  summarize(text: string): Promise<string>
-}
-```
+**Unstable (may change):**
+- `getStatus()` payload shape
+- Internal orchestration logic
+- Runtime event details beyond documented meaning
 
 ## Project Structure
 
 ```
 council-of-experts/
+├── docs/
+│   └── council-of-experts-contract.md  # Complete specification
 ├── packages/
-│   ├── core/              # Main library
+│   ├── core/                           # Main library
 │   │   ├── src/
-│   │   │   ├── CouncilOrchestrator.ts
-│   │   │   ├── AIClient.ts
-│   │   │   ├── ToolSystem.ts
-│   │   │   ├── types.ts
+│   │   │   ├── types.ts                # Contract types
+│   │   │   ├── CouncilImpl.ts          # Council implementation
+│   │   │   ├── CouncilModule.ts        # Factory
 │   │   │   └── utils.ts
 │   │   └── dist/
-│   │
-│   └── cli/               # Example application
+│   └── cli/                            # Example CLI application
 │       ├── src/
 │       │   ├── index.ts
-│       │   ├── providers.ts  # Example provider implementations
-│       │   ├── tools.ts      # Example custom tools
-│       │   └── chat.ts       # Interactive chat loop
+│       │   ├── ChatCompletionsEngine.ts # EngineAdapter implementation
+│       │   ├── tools.ts                # ToolHost example
+│       │   ├── chat.ts
+│       │   └── config.ts
 │       └── config.example.json
 ```
 
@@ -342,22 +315,22 @@ cd packages/core
 npm install
 npm run build
 
-# Build CLI example
+# Build CLI
 cd packages/cli
 npm install
 npm run build
 
 # Run CLI
-npm run dev
+npm start config.example.json
 ```
 
 ## Use Cases
 
-- **Multi-agent code review** - Security, performance, and style experts
-- **Document collaboration** - Writers, editors, and reviewers
-- **Data analysis** - Analysts, statisticians, and visualizers
-- **Content creation** - Researchers, writers, and fact-checkers
-- **Technical support** - Diagnostics, troubleshooting, and documentation experts
+- **Multi-agent deliberation** - Experts privately discuss before public response
+- **Oracle synthesis** - Multiple perspectives unified into single voice
+- **Event-sourced AI** - Full audit trail of agent activity
+- **Host-controlled persistence** - Integrate with your storage/event system
+- **Mode switching** - Adapt orchestration strategy per turn
 
 ## License
 
@@ -365,8 +338,4 @@ MIT
 
 ## Contributing
 
-Issues and PRs welcome. The library aims to be:
-- **Generic** - No domain-specific logic
-- **Flexible** - Provider-based architecture
-- **Well-tested** - Core functionality covered
-- **Well-documented** - Clear examples and API docs
+See [docs/council-of-experts-contract.md](./docs/council-of-experts-contract.md) for the complete contract specification.
