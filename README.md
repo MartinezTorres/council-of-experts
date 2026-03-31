@@ -42,8 +42,9 @@ import { createCouncilModule } from 'council-of-experts';
 import type {
   AgentDefinition,
   EngineAdapter,
+  EngineInput,
+  EngineOutput,
   ToolHost,
-  CouncilModuleConfig
 } from 'council-of-experts';
 
 // 1. Define agents
