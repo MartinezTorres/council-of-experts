@@ -41,7 +41,6 @@
     }
   ],
   "timeout_ms": 60000,
-  "max_tokens": 2000,
   "verbose": false,
   "initial_document": "# Welcome\n\nThis is your collaborative document. Agents can read and edit it using tools."
 }

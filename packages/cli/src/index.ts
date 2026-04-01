@@ -36,8 +36,7 @@ async function main() {
   const engines: Record<string, EngineAdapter> = {};
   for (const engineConfig of config.engines) {
     engines[engineConfig.id] = new ChatCompletionsEngine(
-      config.timeout_ms || 60000,
-      config.max_tokens
+      config.timeout_ms || 60000
     );
   }
 

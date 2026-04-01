@@ -15,7 +15,6 @@ interface ChatCompletionsRequest {
   model: string;
   messages: ChatMessage[];
   temperature?: number;
-  max_tokens?: number;
 }
 
 interface ChatCompletionsResponse {
@@ -28,11 +27,9 @@ interface ChatCompletionsResponse {
 
 export class ChatCompletionsEngine implements EngineAdapter {
   private timeoutMs: number;
-  private maxTokens: number | undefined;
 
-  constructor(timeoutMs: number = 60000, maxTokens?: number) {
+  constructor(timeoutMs: number = 60000) {
     this.timeoutMs = timeoutMs;
-    this.maxTokens = maxTokens;
   }
 
   async generate(input: EngineInput): Promise<EngineOutput> {
@@ -77,7 +74,6 @@ export class ChatCompletionsEngine implements EngineAdapter {
       model: engineSpec.model,
       messages,
       temperature: engineSpec.settings?.temperature as number | undefined ?? 0.7,
-      ...(this.maxTokens !== undefined && { max_tokens: this.maxTokens }),
     };
 
     const apiKey = engineSpec.settings?.api_key as string | undefined;

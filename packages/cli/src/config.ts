@@ -41,7 +41,6 @@ export interface CLIConfig {
   engines: EngineConfig[];
   agents: AgentConfig[];
   timeout_ms?: number;
-  max_tokens?: number;
   verbose?: boolean;
   initial_document?: string;
 }
