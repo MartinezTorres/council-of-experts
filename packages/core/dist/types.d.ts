@@ -3,6 +3,20 @@
  * Based on contract version 1
  */
 export declare const COUNCIL_CONTRACT_VERSION: 1;
+export interface ProbeResult {
+    success: boolean;
+    responseTimeMs: number;
+    response?: string;
+    error?: string;
+}
+export interface DiscoveredModel {
+    id: string;
+    contextWindow?: number;
+}
+export interface ToolProbeResult {
+    supportsTools: boolean | 'unknown';
+    error?: string;
+}
 export type CouncilMode = 'open' | 'council' | 'oracle';
 export interface EngineSpec {
     id: string;

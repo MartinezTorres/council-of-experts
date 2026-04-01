@@ -26,6 +26,9 @@ export type {
   CouncilRuntimeEvent,
   Council,
   CouncilModule,
+  ProbeResult,
+  DiscoveredModel,
+  ToolProbeResult,
 } from './types.js';
 
 // Export constant
@@ -36,3 +39,6 @@ export { createCouncilModule } from './CouncilModule.js';
 
 // Export utility functions
 export { generateId, normalizeTimestamp } from './utils.js';
+
+// Export engine probe and provider discovery utilities
+export { probeEngine, discoverModels, testToolSupport } from './probe.js';
