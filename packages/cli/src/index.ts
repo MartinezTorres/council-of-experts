@@ -37,7 +37,7 @@ async function main() {
   for (const engineConfig of config.engines) {
     engines[engineConfig.id] = new ChatCompletionsEngine(
       config.timeout_ms || 60000,
-      config.max_tokens || 2000
+      config.max_tokens
     );
   }
 

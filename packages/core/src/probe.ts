@@ -163,7 +163,9 @@ export async function testToolSupport(
   };
 
   // First attempt: force tool use with tool_choice: "required"
-  // Falls back to tool_choice: "auto" if the server rejects "required"
+  // Falls back to tool_choice: "auto" if:
+  //   - the server rejects "required" with a non-2xx response, OR
+  //   - the server silently ignores "required" (HTTP 200 but no tool_calls in response)
   for (const toolChoice of ['required', 'auto'] as const) {
     try {
       const response = await fetch(`${baseUrl}/v1/chat/completions`, {
@@ -174,13 +176,12 @@ export async function testToolSupport(
           messages: [{ role: 'user', content: 'Use the calculator tool to compute 2+2.' }],
           tools: [tool],
           tool_choice: toolChoice,
-          max_tokens: 100,
         }),
         signal: AbortSignal.timeout(timeoutMs),
       });
 
       if (!response.ok) {
-        // A 400 on "required" likely means the server doesn't support that option — retry with "auto"
+        // A non-2xx on "required" likely means the server doesn't support that option — retry with "auto"
         if (toolChoice === 'required') continue;
         return { supportsTools: false, error: `HTTP ${response.status}: ${response.statusText}` };
       }
@@ -188,6 +189,11 @@ export async function testToolSupport(
       const data = (await response.json()) as any;
       const choice = data.choices?.[0];
       const hasToolCall = Boolean(choice?.message?.tool_calls?.length) || choice?.finish_reason === 'tool_calls';
+
+      // Some servers (e.g. llama-swap/llama.cpp) silently ignore tool_choice: "required" and return
+      // a normal text completion with finish_reason: "stop". Retry with "auto" in that case.
+      if (!hasToolCall && toolChoice === 'required') continue;
+
       return { supportsTools: hasToolCall };
     } catch (error) {
       if (toolChoice === 'required') continue;
