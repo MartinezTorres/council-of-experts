@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w council-of-experts && npm run build -w @council-of-experts/cli",
     "test": "npm run test --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present"
   },

@@ -2,8 +2,9 @@
  * Configuration loading for CLI
  */
 
-import type { AgentDefinition, EngineSpec } from 'council-of-experts';
+import type { AgentDefinition, EngineSpec, ToolRef } from 'council-of-experts';
 import { readFileSync } from 'fs';
+import { getCLIToolDefinition } from './tools.js';
 
 /**
  * Engine configuration (maps to EngineSpec in contract)
@@ -30,7 +31,7 @@ export interface AgentConfig {
   engine: string; // Reference to engine by ID
   summary: string;
   systemPrompt: string;
-  tools?: string[];
+  tools?: ToolRef[];
   metadata?: Record<string, unknown>;
 }
 
@@ -42,7 +43,7 @@ export interface CLIConfig {
   agents: AgentConfig[];
   timeout_ms?: number;
   verbose?: boolean;
-  initial_document?: string;
+  workspaceRoot?: string;
 }
 
 /**
@@ -104,11 +105,27 @@ export function buildAgentDefinitions(config: CLIConfig): AgentDefinition[] {
       modelName: engineConfig.model,
       summary: agent.summary,
       systemPrompt: agent.systemPrompt,
-      tools: agent.tools,
+      tools: normalizeToolRefs(agent.tools),
       metadata: {
         ...agent.metadata,
         icon: agent.icon,
       },
     };
   });
+}
+
+function normalizeToolRefs(tools?: ToolRef[]): ToolRef[] | undefined {
+  if (!tools || tools.length === 0) return undefined;
+
+  return tools
+    .map((tool) => {
+      if (typeof tool !== 'string') {
+        return tool;
+      }
+
+      return getCLIToolDefinition(tool) ?? tool;
+    })
+    .filter((tool) => {
+      return typeof tool === 'string' || tool.name.trim().length > 0;
+    });
 }

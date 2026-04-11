@@ -5,7 +5,10 @@
 
 // Export all contract types
 export type {
+  CouncilError,
   CouncilMode,
+  ToolDefinition,
+  ToolRef,
   EngineSpec,
   AgentDefinition,
   OpenCouncilInput,
@@ -23,6 +26,7 @@ export type {
   CouncilRecord,
   CouncilReplayEntry,
   TurnResult,
+  TurnError,
   CouncilRuntimeEvent,
   Council,
   CouncilModule,

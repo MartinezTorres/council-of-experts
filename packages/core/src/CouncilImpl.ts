@@ -11,7 +11,13 @@ import {
   AgentDefinition,
   EngineAdapter,
   ToolHost,
+  ToolCall,
+  ToolResult,
+  ToolDefinition,
   EngineInput,
+  EngineOutput,
+  CouncilError,
+  TurnError,
   COUNCIL_CONTRACT_VERSION,
 } from './types.js';
 import { generateId } from './utils.js';
@@ -75,11 +81,12 @@ export class CouncilImpl implements Council {
             break;
 
           case 'message.emitted':
-            this.state.messages.push(record.message);
+            this.state.messages.push(this.snapshotMessage(record.message));
             break;
 
           case 'tool.called':
           case 'tool.result':
+          case 'error':
             // Tool records are acknowledged but don't change visible state
             // during replay - they're part of the audit trail
             break;
@@ -100,6 +107,7 @@ export class CouncilImpl implements Council {
     const records: CouncilRecord[] = [];
     const publicMessages: CouncilMessage[] = [];
     const privateMessages: CouncilMessage[] = [];
+    const errors: TurnError[] = [];
 
     // Change mode if requested
     if (mode !== this.state.mode) {
@@ -125,7 +133,8 @@ export class CouncilImpl implements Council {
           options,
           publicMessages,
           privateMessages,
-          records
+          records,
+          errors
         );
         break;
 
@@ -136,7 +145,8 @@ export class CouncilImpl implements Council {
           options,
           publicMessages,
           privateMessages,
-          records
+          records,
+          errors
         );
         break;
 
@@ -147,7 +157,8 @@ export class CouncilImpl implements Council {
           options,
           publicMessages,
           privateMessages,
-          records
+          records,
+          errors
         );
         break;
     }
@@ -163,15 +174,18 @@ export class CouncilImpl implements Council {
     };
     records.push(completedRecord);
 
-    // Add messages to state
-    this.state.messages.push(...publicMessages, ...privateMessages);
+    // Commit messages in durable record order so post(), replay(), and stream()
+    // converge on the same state.
+    this.state.messages.push(...this.collectCommittedMessages(records));
 
     return {
       turnId,
       mode,
-      publicMessages,
-      privateMessages,
+      nextMode: this.state.mode,
+      publicMessages: publicMessages.map((message) => this.snapshotMessage(message)),
+      privateMessages: privateMessages.map((message) => this.snapshotMessage(message)),
       records,
+      errors: errors.map((entry) => this.snapshotTurnError(entry)),
     };
   }
 
@@ -224,8 +238,10 @@ export class CouncilImpl implements Council {
         break;
     }
 
-    // Commit all messages to state only after turn fully completes
-    this.state.messages.push(...pendingMessages);
+    // Commit all messages to state only after turn fully completes.
+    this.state.messages.push(
+      ...pendingMessages.map((message) => this.snapshotMessage(message))
+    );
 
     // Emit turn.completed
     yield {
@@ -256,7 +272,7 @@ export class CouncilImpl implements Council {
       filtered = filtered.slice(-limit);
     }
 
-    return filtered;
+    return filtered.map((message) => this.snapshotMessage(message));
   }
 
   async getStatus(): Promise<unknown> {
@@ -279,7 +295,10 @@ export class CouncilImpl implements Council {
         name: a.name,
         engine: a.engine.id,
       })),
-      metadata: this.state.metadata,
+      metadata:
+        this.state.metadata === undefined
+          ? undefined
+          : structuredClone(this.state.metadata),
     };
   }
 
@@ -296,6 +315,478 @@ export class CouncilImpl implements Council {
     }
   }
 
+  // Tooling helpers
+
+  private snapshotMessage(message: CouncilMessage): CouncilMessage {
+    return {
+      ...message,
+      author: { ...message.author },
+      metadata:
+        message.metadata === undefined ? undefined : structuredClone(message.metadata),
+    };
+  }
+
+  private snapshotTurnError(entry: TurnError): TurnError {
+    return {
+      agentId: entry.agentId,
+      error: {
+        ...entry.error,
+        data:
+          entry.error.data === undefined
+            ? undefined
+            : structuredClone(entry.error.data),
+      },
+    };
+  }
+
+  private collectCommittedMessages(records: CouncilRecord[]): CouncilMessage[] {
+    return records
+      .filter((record): record is Extract<CouncilRecord, { type: 'message.emitted' }> => {
+        return record.type === 'message.emitted';
+      })
+      .map((record) => this.snapshotMessage(record.message));
+  }
+
+  private recordTurnError(
+    turnId: string,
+    records: CouncilRecord[],
+    errors: TurnError[],
+    error: CouncilError,
+    agentId?: string
+  ): void {
+    const snapshot: CouncilError = {
+      ...error,
+      data: error.data === undefined ? undefined : structuredClone(error.data),
+    };
+
+    records.push({
+      contractVersion: COUNCIL_CONTRACT_VERSION,
+      type: 'error',
+      councilId: this.state.councilId,
+      turnId,
+      timestamp: new Date().toISOString(),
+      agentId,
+      error: snapshot,
+    });
+
+    errors.push({
+      agentId,
+      error: snapshot,
+    });
+  }
+
+  private getToolDefinitions(agent: AgentDefinition): ToolDefinition[] {
+    const tools = agent.tools ?? [];
+    return tools
+      .map((tool) => (typeof tool === 'string' ? { name: tool } : tool))
+      .filter((tool) => typeof tool.name === 'string' && tool.name.trim().length > 0);
+  }
+
+  private extractToolCalls(output: EngineOutput): ToolCall[] {
+    const direct = Array.isArray(output.toolCalls) ? output.toolCalls : [];
+    if (direct.length > 0) {
+      return this.normalizeToolCalls(direct);
+    }
+
+    const metadata = output.metadata as Record<string, unknown> | undefined;
+    const candidate =
+      (metadata as { toolCalls?: unknown })?.toolCalls ??
+      (metadata as { tool_calls?: unknown })?.tool_calls;
+
+    return this.normalizeToolCalls(candidate);
+  }
+
+  private normalizeToolCalls(raw: unknown): ToolCall[] {
+    if (!Array.isArray(raw)) return [];
+
+    const normalized: ToolCall[] = [];
+    for (const entry of raw) {
+      const toolCall = this.normalizeToolCall(entry);
+      if (toolCall) normalized.push(toolCall);
+    }
+    return normalized;
+  }
+
+  private normalizeToolCall(raw: unknown): ToolCall | null {
+    if (!raw || typeof raw !== 'object') return null;
+
+    const record = raw as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id : undefined;
+
+    if (typeof record.name === 'string') {
+      const args = this.normalizeToolArgs(record.args ?? record.arguments);
+      return {
+        id,
+        name: record.name,
+        args,
+      };
+    }
+
+    const fn = record.function as Record<string, unknown> | undefined;
+    if (fn && typeof fn.name === 'string') {
+      const args = this.normalizeToolArgs(fn.arguments);
+      return {
+        id,
+        name: fn.name,
+        args,
+      };
+    }
+
+    return null;
+  }
+
+  private normalizeToolArgs(args: unknown): Record<string, unknown> | undefined {
+    if (!args) return undefined;
+    if (typeof args === 'string') {
+      try {
+        const parsed = JSON.parse(args) as Record<string, unknown>;
+        if (parsed && typeof parsed === 'object') {
+          return parsed;
+        }
+      } catch {
+        return undefined;
+      }
+      return undefined;
+    }
+
+    if (typeof args === 'object') {
+      return args as Record<string, unknown>;
+    }
+
+    return undefined;
+  }
+
+  private async executeToolCalls(
+    turnId: string,
+    agent: AgentDefinition,
+    toolCalls: ToolCall[],
+    records: CouncilRecord[],
+    allowedToolNames: Set<string>,
+    overrideError?: string
+  ): Promise<{ calls: ToolCall[]; results: ToolResult[] }> {
+    const calls: ToolCall[] = [];
+    const results: ToolResult[] = [];
+
+    for (const call of toolCalls) {
+      const callId = call.id ?? generateId();
+      const normalizedCall: ToolCall = {
+        ...call,
+        id: callId,
+      };
+
+      calls.push(normalizedCall);
+
+      const calledRecord: CouncilRecord = {
+        contractVersion: COUNCIL_CONTRACT_VERSION,
+        type: 'tool.called',
+        councilId: this.state.councilId,
+        turnId,
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        callId,
+        call: normalizedCall,
+      };
+      records.push(calledRecord);
+
+      let result: ToolResult;
+      if (overrideError) {
+        result = {
+          ok: false,
+          error: overrideError,
+        };
+      } else if (!allowedToolNames.has(normalizedCall.name)) {
+        result = {
+          ok: false,
+          error: `Tool not allowed: ${normalizedCall.name}`,
+        };
+      } else if (!this.toolHost) {
+        result = {
+          ok: false,
+          error: 'ToolHost not configured',
+        };
+      } else {
+        try {
+          result = await this.toolHost.execute(normalizedCall, {
+            councilId: this.state.councilId,
+            turnId,
+            agentId: agent.id,
+          });
+        } catch (error) {
+          result = {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+
+      const resultWithId: ToolResult = {
+        ...result,
+        callId,
+      };
+
+      const resultRecord: CouncilRecord = {
+        contractVersion: COUNCIL_CONTRACT_VERSION,
+        type: 'tool.result',
+        councilId: this.state.councilId,
+        turnId,
+        timestamp: new Date().toISOString(),
+        agentId: agent.id,
+        callId,
+        result: resultWithId,
+      };
+      records.push(resultRecord);
+
+      results.push(resultWithId);
+    }
+
+    return { calls, results };
+  }
+
+  private async generateWithTools(
+    turnId: string,
+    agent: AgentDefinition,
+    mode: CouncilMode,
+    event: ChatEvent,
+    history: CouncilMessage[],
+    options: TurnOptions | undefined,
+    records: CouncilRecord[],
+    errors: TurnError[]
+  ): Promise<EngineOutput | null> {
+    const engine = this.engines.get(agent.engine.id);
+    if (!engine) {
+      throw new Error(`Engine ${agent.engine.id} not found`);
+    }
+
+    const toolDefinitions = this.getToolDefinitions(agent);
+    const allowedToolNames = new Set(toolDefinitions.map((tool) => tool.name));
+
+    const maxToolRounds = Math.max(0, options?.maxRounds ?? 3);
+    let toolRounds = 0;
+
+    const toolCallsHistory: ToolCall[] = [];
+    const toolResultsHistory: ToolResult[] = [];
+
+    while (true) {
+      const input: EngineInput = {
+        councilId: this.state.councilId,
+        turnId,
+        agent,
+        mode,
+        event,
+        history,
+        tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+        toolCalls: toolCallsHistory.length > 0 ? toolCallsHistory : undefined,
+        toolResults: toolResultsHistory.length > 0 ? toolResultsHistory : undefined,
+      };
+
+      const output = await engine.generate(input);
+      const toolCalls = this.extractToolCalls(output);
+
+      if (toolCalls.length === 0) {
+        return output;
+      }
+
+      if (toolRounds >= maxToolRounds) {
+        const { calls, results } = await this.executeToolCalls(
+          turnId,
+          agent,
+          toolCalls,
+          records,
+          allowedToolNames,
+          `Tool round limit (${maxToolRounds}) reached`
+        );
+
+        toolCallsHistory.push(...calls);
+        toolResultsHistory.push(...results);
+
+        this.recordTurnError(
+          turnId,
+          records,
+          errors,
+          {
+            code: 'tool_round_limit',
+            message: `Max tool rounds (${maxToolRounds}) reached for agent ${agent.id}`,
+          },
+          agent.id
+        );
+        return null;
+      }
+
+      toolRounds += 1;
+
+      const { calls, results } = await this.executeToolCalls(
+        turnId,
+        agent,
+        toolCalls,
+        records,
+        allowedToolNames
+      );
+
+      toolCallsHistory.push(...calls);
+      toolResultsHistory.push(...results);
+    }
+  }
+
+  private async *generateWithToolsStream(
+    turnId: string,
+    agent: AgentDefinition,
+    mode: CouncilMode,
+    event: ChatEvent,
+    history: CouncilMessage[],
+    options: TurnOptions | undefined
+  ): AsyncGenerator<CouncilRuntimeEvent, EngineOutput | null, void> {
+    const engine = this.engines.get(agent.engine.id);
+    if (!engine) {
+      throw new Error(`Engine ${agent.engine.id} not found`);
+    }
+
+    const toolDefinitions = this.getToolDefinitions(agent);
+    const allowedToolNames = new Set(toolDefinitions.map((tool) => tool.name));
+
+    const maxToolRounds = Math.max(0, options?.maxRounds ?? 3);
+    let toolRounds = 0;
+
+    const toolCallsHistory: ToolCall[] = [];
+    const toolResultsHistory: ToolResult[] = [];
+
+    while (true) {
+      const input: EngineInput = {
+        councilId: this.state.councilId,
+        turnId,
+        agent,
+        mode,
+        event,
+        history,
+        tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+        toolCalls: toolCallsHistory.length > 0 ? toolCallsHistory : undefined,
+        toolResults: toolResultsHistory.length > 0 ? toolResultsHistory : undefined,
+      };
+
+      const output = await engine.generate(input);
+      const toolCalls = this.extractToolCalls(output);
+
+      if (toolCalls.length === 0) {
+        return output;
+      }
+
+      if (toolRounds >= maxToolRounds) {
+        for (const call of toolCalls) {
+          const callId = call.id ?? generateId();
+          const normalizedCall: ToolCall = {
+            ...call,
+            id: callId,
+          };
+
+          yield {
+            type: 'tool.called',
+            councilId: this.state.councilId,
+            turnId,
+            agentId: agent.id,
+            timestamp: new Date().toISOString(),
+            callId,
+            call: normalizedCall,
+          };
+
+          const resultWithId: ToolResult = {
+            ok: false,
+            error: `Tool round limit (${maxToolRounds}) reached`,
+            callId,
+          };
+
+          yield {
+            type: 'tool.result',
+            councilId: this.state.councilId,
+            turnId,
+            agentId: agent.id,
+            timestamp: new Date().toISOString(),
+            callId,
+            result: resultWithId,
+          };
+
+          toolCallsHistory.push(normalizedCall);
+          toolResultsHistory.push(resultWithId);
+        }
+
+        yield {
+          type: 'error',
+          councilId: this.state.councilId,
+          turnId,
+          agentId: agent.id,
+          timestamp: new Date().toISOString(),
+          error: {
+            code: 'tool_round_limit',
+            message: `Max tool rounds (${maxToolRounds}) reached for agent ${agent.id}`,
+          },
+        };
+        return null;
+      }
+
+      toolRounds += 1;
+
+      for (const call of toolCalls) {
+        const callId = call.id ?? generateId();
+        const normalizedCall: ToolCall = {
+          ...call,
+          id: callId,
+        };
+
+        yield {
+          type: 'tool.called',
+          councilId: this.state.councilId,
+          turnId,
+          agentId: agent.id,
+          timestamp: new Date().toISOString(),
+          callId,
+          call: normalizedCall,
+        };
+
+        let result: ToolResult;
+        if (!allowedToolNames.has(normalizedCall.name)) {
+          result = {
+            ok: false,
+            error: `Tool not allowed: ${normalizedCall.name}`,
+          };
+        } else if (!this.toolHost) {
+          result = {
+            ok: false,
+            error: 'ToolHost not configured',
+          };
+        } else {
+          try {
+            result = await this.toolHost.execute(normalizedCall, {
+              councilId: this.state.councilId,
+              turnId,
+              agentId: agent.id,
+            });
+          } catch (error) {
+            result = {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        const resultWithId: ToolResult = {
+          ...result,
+          callId,
+        };
+
+        yield {
+          type: 'tool.result',
+          councilId: this.state.councilId,
+          turnId,
+          agentId: agent.id,
+          timestamp: new Date().toISOString(),
+          callId,
+          result: resultWithId,
+        };
+
+        toolCallsHistory.push(normalizedCall);
+        toolResultsHistory.push(resultWithId);
+      }
+    }
+  }
+
   // Mode-specific execution methods
 
   private async executeOpenMode(
@@ -304,7 +795,8 @@ export class CouncilImpl implements Council {
     options: TurnOptions | undefined,
     publicMessages: CouncilMessage[],
     privateMessages: CouncilMessage[],
-    records: CouncilRecord[]
+    records: CouncilRecord[],
+    errors: TurnError[]
   ): Promise<void> {
     // In open mode, agents may speak independently in public
     // Simple parallel execution - each agent that wants to respond does so publicly
@@ -314,23 +806,21 @@ export class CouncilImpl implements Council {
     await Promise.allSettled(
       activeAgents.map(async (agent) => {
         try {
-          const engine = this.engines.get(agent.engine.id);
-          if (!engine) {
-            throw new Error(`Engine ${agent.engine.id} not found`);
-          }
-
-          const input: EngineInput = {
-            councilId: this.state.councilId,
+          const history = this.state.messages.filter(
+            (m) => m.visibility === 'public'
+          );
+          const output = await this.generateWithTools(
             turnId,
             agent,
-            mode: 'open',
+            'open',
             event,
-            history: this.state.messages.filter((m) => m.visibility === 'public'),
-          };
+            history,
+            options,
+            records,
+            errors
+          );
 
-          const output = await engine.generate(input);
-
-          if (output.content.trim()) {
+          if (output && output.content.trim()) {
             const message: CouncilMessage = {
               id: generateId(),
               turnId,
@@ -358,8 +848,18 @@ export class CouncilImpl implements Council {
             records.push(record);
           }
         } catch (error) {
-          // Log error but don't fail the whole turn
-          console.error(`Agent ${agent.id} failed in open mode:`, error);
+          this.recordTurnError(
+            turnId,
+            records,
+            errors,
+            {
+              code: 'agent_execution_failed',
+              message: `Agent ${agent.id} failed in open mode: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+            agent.id
+          );
         }
       })
     );
@@ -371,7 +871,8 @@ export class CouncilImpl implements Council {
     options: TurnOptions | undefined,
     publicMessages: CouncilMessage[],
     privateMessages: CouncilMessage[],
-    records: CouncilRecord[]
+    records: CouncilRecord[],
+    errors: TurnError[]
   ): Promise<void> {
     // In council mode, agents deliberate privately then may emit public messages
     // Phase 1: Private deliberation
@@ -386,21 +887,18 @@ export class CouncilImpl implements Council {
     await Promise.allSettled(
       activeAgents.map(async (agent) => {
         try {
-          const engine = this.engines.get(agent.engine.id);
-          if (!engine) return;
-
-          const input: EngineInput = {
-            councilId: this.state.councilId,
+          const output = await this.generateWithTools(
             turnId,
             agent,
-            mode: 'council',
+            'council',
             event,
-            history: this.state.messages,
-          };
+            this.state.messages,
+            options,
+            records,
+            errors
+          );
 
-          const output = await engine.generate(input);
-
-          if (output.content.trim()) {
+          if (output && output.content.trim()) {
             privateThoughts.push({ agent, content: output.content });
 
             const message: CouncilMessage = {
@@ -430,7 +928,18 @@ export class CouncilImpl implements Council {
             records.push(record);
           }
         } catch (error) {
-          console.error(`Agent ${agent.id} failed in council mode:`, error);
+          this.recordTurnError(
+            turnId,
+            records,
+            errors,
+            {
+              code: 'agent_execution_failed',
+              message: `Agent ${agent.id} failed in council deliberation: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+            agent.id
+          );
         }
       })
     );
@@ -443,9 +952,6 @@ export class CouncilImpl implements Council {
       await Promise.allSettled(
         activeAgents.map(async (agent) => {
           try {
-            const engine = this.engines.get(agent.engine.id);
-            if (!engine) return;
-
             // Create a synthesis prompt showing all private thoughts
             const synthesisPrompt = `Based on the council's private deliberation, formulate your public response.
 
@@ -459,18 +965,18 @@ Your public response (or say nothing if you have nothing to add):`;
               content: synthesisPrompt,
             };
 
-            const input: EngineInput = {
-              councilId: this.state.councilId,
+            const output = await this.generateWithTools(
               turnId,
               agent,
-              mode: 'council',
-              event: synthesisEvent,
-              history: [...this.state.messages, ...privateMessages],
-            };
+              'council',
+              synthesisEvent,
+              [...this.state.messages, ...privateMessages],
+              options,
+              records,
+              errors
+            );
 
-            const output = await engine.generate(input);
-
-            if (output.content.trim()) {
+            if (output && output.content.trim()) {
               const message: CouncilMessage = {
                 id: generateId(),
                 turnId,
@@ -498,9 +1004,17 @@ Your public response (or say nothing if you have nothing to add):`;
               records.push(record);
             }
           } catch (error) {
-            console.error(
-              `Agent ${agent.id} failed in council synthesis:`,
-              error
+            this.recordTurnError(
+              turnId,
+              records,
+              errors,
+              {
+                code: 'agent_execution_failed',
+                message: `Agent ${agent.id} failed in council synthesis: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              },
+              agent.id
             );
           }
         })
@@ -514,7 +1028,8 @@ Your public response (or say nothing if you have nothing to add):`;
     options: TurnOptions | undefined,
     publicMessages: CouncilMessage[],
     privateMessages: CouncilMessage[],
-    records: CouncilRecord[]
+    records: CouncilRecord[],
+    errors: TurnError[]
   ): Promise<void> {
     // In oracle mode, agents deliberate privately but the public response is unified
     // Phase 1: Private deliberation
@@ -529,21 +1044,18 @@ Your public response (or say nothing if you have nothing to add):`;
     await Promise.allSettled(
       activeAgents.map(async (agent) => {
         try {
-          const engine = this.engines.get(agent.engine.id);
-          if (!engine) return;
-
-          const input: EngineInput = {
-            councilId: this.state.councilId,
+          const output = await this.generateWithTools(
             turnId,
             agent,
-            mode: 'oracle',
+            'oracle',
             event,
-            history: this.state.messages,
-          };
+            this.state.messages,
+            options,
+            records,
+            errors
+          );
 
-          const output = await engine.generate(input);
-
-          if (output.content.trim()) {
+          if (output && output.content.trim()) {
             privateThoughts.push({ agent, content: output.content });
 
             const message: CouncilMessage = {
@@ -573,7 +1085,18 @@ Your public response (or say nothing if you have nothing to add):`;
             records.push(record);
           }
         } catch (error) {
-          console.error(`Agent ${agent.id} failed in oracle mode:`, error);
+          this.recordTurnError(
+            turnId,
+            records,
+            errors,
+            {
+              code: 'agent_execution_failed',
+              message: `Agent ${agent.id} failed in oracle deliberation: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+            agent.id
+          );
         }
       })
     );
@@ -582,63 +1105,70 @@ Your public response (or say nothing if you have nothing to add):`;
     // Use the first available agent to synthesize a unified response
     if (privateThoughts.length > 0 && activeAgents.length > 0) {
       const synthesisAgent = activeAgents[0];
-      const engine = this.engines.get(synthesisAgent.engine.id);
-
-      if (engine) {
-        try {
-          const oraclePrompt = `You are the Oracle, speaking with one unified voice for the council.
+      try {
+        const oraclePrompt = `You are the Oracle, speaking with one unified voice for the council.
 
 Private deliberation from council members:
 ${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
 
 Synthesize a single, unified response that represents the council's collective wisdom:`;
 
-          const oracleEvent: ChatEvent = {
-            ...event,
-            content: oraclePrompt,
+        const oracleEvent: ChatEvent = {
+          ...event,
+          content: oraclePrompt,
+        };
+
+        const output = await this.generateWithTools(
+          turnId,
+          synthesisAgent,
+          'oracle',
+          oracleEvent,
+          [...this.state.messages, ...privateMessages],
+          options,
+          records,
+          errors
+        );
+
+        if (output && output.content.trim()) {
+          const message: CouncilMessage = {
+            id: generateId(),
+            turnId,
+            author: {
+              type: 'oracle',
+              id: 'oracle',
+              name: 'Oracle',
+            },
+            visibility: 'public',
+            content: output.content,
+            timestamp: new Date().toISOString(),
+            metadata: output.metadata,
           };
 
-          const input: EngineInput = {
+          publicMessages.push(message);
+
+          const record: CouncilRecord = {
+            contractVersion: COUNCIL_CONTRACT_VERSION,
+            type: 'message.emitted',
             councilId: this.state.councilId,
             turnId,
-            agent: synthesisAgent,
-            mode: 'oracle',
-            event: oracleEvent,
-            history: [...this.state.messages, ...privateMessages],
+            timestamp: message.timestamp,
+            message,
           };
-
-          const output = await engine.generate(input);
-
-          if (output.content.trim()) {
-            const message: CouncilMessage = {
-              id: generateId(),
-              turnId,
-              author: {
-                type: 'oracle',
-                id: 'oracle',
-                name: 'Oracle',
-              },
-              visibility: 'public',
-              content: output.content,
-              timestamp: new Date().toISOString(),
-              metadata: output.metadata,
-            };
-
-            publicMessages.push(message);
-
-            const record: CouncilRecord = {
-              contractVersion: COUNCIL_CONTRACT_VERSION,
-              type: 'message.emitted',
-              councilId: this.state.councilId,
-              turnId,
-              timestamp: message.timestamp,
-              message,
-            };
-            records.push(record);
-          }
-        } catch (error) {
-          console.error('Oracle synthesis failed:', error);
+          records.push(record);
         }
+      } catch (error) {
+        this.recordTurnError(
+          turnId,
+          records,
+          errors,
+          {
+            code: 'oracle_synthesis_failed',
+            message: `Oracle synthesis failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          },
+          synthesisAgent.id
+        );
       }
     }
   }
@@ -650,7 +1180,7 @@ Synthesize a single, unified response that represents the council's collective w
     event: ChatEvent,
     options: TurnOptions | undefined,
     pendingMessages: CouncilMessage[]
-  ): AsyncIterable<CouncilRuntimeEvent> {
+  ): AsyncGenerator<CouncilRuntimeEvent, void, void> {
     const activeAgents = this.selectAgents(event, options);
 
     for (const agent of activeAgents) {
@@ -663,23 +1193,19 @@ Synthesize a single, unified response that represents the council's collective w
       };
 
       try {
-        const engine = this.engines.get(agent.engine.id);
-        if (!engine) {
-          throw new Error(`Engine ${agent.engine.id} not found`);
-        }
-
-        const input: EngineInput = {
-          councilId: this.state.councilId,
+        const history = this.state.messages.filter(
+          (m) => m.visibility === 'public'
+        );
+        const output = yield* this.generateWithToolsStream(
           turnId,
           agent,
-          mode: 'open',
+          'open',
           event,
-          history: this.state.messages.filter((m) => m.visibility === 'public'),
-        };
+          history,
+          options
+        );
 
-        const output = await engine.generate(input);
-
-        if (output.content.trim()) {
+        if (output && output.content.trim()) {
           const message: CouncilMessage = {
             id: generateId(),
             turnId,
@@ -707,7 +1233,10 @@ Synthesize a single, unified response that represents the council's collective w
           turnId,
           agentId: agent.id,
           timestamp: new Date().toISOString(),
-          error: { message: error instanceof Error ? error.message : String(error) },
+          error: {
+            code: 'agent_execution_failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
         };
       }
 
@@ -726,7 +1255,7 @@ Synthesize a single, unified response that represents the council's collective w
     event: ChatEvent,
     options: TurnOptions | undefined,
     pendingMessages: CouncilMessage[]
-  ): AsyncIterable<CouncilRuntimeEvent> {
+  ): AsyncGenerator<CouncilRuntimeEvent, void, void> {
     const activeAgents = this.selectAgents(event, options);
     const privateThoughts: Array<{ agent: AgentDefinition; content: string }> = [];
 
@@ -741,21 +1270,16 @@ Synthesize a single, unified response that represents the council's collective w
       };
 
       try {
-        const engine = this.engines.get(agent.engine.id);
-        if (!engine) continue;
-
-        const input: EngineInput = {
-          councilId: this.state.councilId,
+        const output = yield* this.generateWithToolsStream(
           turnId,
           agent,
-          mode: 'council',
+          'council',
           event,
-          history: [...this.state.messages, ...pendingMessages],
-        };
+          [...this.state.messages, ...pendingMessages],
+          options
+        );
 
-        const output = await engine.generate(input);
-
-        if (output.content.trim()) {
+        if (output && output.content.trim()) {
           privateThoughts.push({ agent, content: output.content });
 
           const message: CouncilMessage = {
@@ -810,9 +1334,6 @@ Synthesize a single, unified response that represents the council's collective w
         };
 
         try {
-          const engine = this.engines.get(agent.engine.id);
-          if (!engine) continue;
-
           const synthesisPrompt = `Based on the council's private deliberation, formulate your public response.
 
 Private thoughts from council:
@@ -820,18 +1341,16 @@ ${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
 
 Your public response (or say nothing if you have nothing to add):`;
 
-          const input: EngineInput = {
-            councilId: this.state.councilId,
+          const output = yield* this.generateWithToolsStream(
             turnId,
             agent,
-            mode: 'council',
-            event: { ...event, content: synthesisPrompt },
-            history: [...this.state.messages, ...pendingMessages],
-          };
+            'council',
+            { ...event, content: synthesisPrompt },
+            [...this.state.messages, ...pendingMessages],
+            options
+          );
 
-          const output = await engine.generate(input);
-
-          if (output.content.trim()) {
+          if (output && output.content.trim()) {
             const message: CouncilMessage = {
               id: generateId(),
               turnId,
@@ -859,7 +1378,10 @@ Your public response (or say nothing if you have nothing to add):`;
             turnId,
             agentId: agent.id,
             timestamp: new Date().toISOString(),
-            error: { message: error instanceof Error ? error.message : String(error) },
+            error: {
+              code: 'agent_execution_failed',
+              message: error instanceof Error ? error.message : String(error),
+            },
           };
         }
 
@@ -879,7 +1401,7 @@ Your public response (or say nothing if you have nothing to add):`;
     event: ChatEvent,
     options: TurnOptions | undefined,
     pendingMessages: CouncilMessage[]
-  ): AsyncIterable<CouncilRuntimeEvent> {
+  ): AsyncGenerator<CouncilRuntimeEvent, void, void> {
     const activeAgents = this.selectAgents(event, options);
     const privateThoughts: Array<{ agent: AgentDefinition; content: string }> = [];
 
@@ -894,21 +1416,16 @@ Your public response (or say nothing if you have nothing to add):`;
       };
 
       try {
-        const engine = this.engines.get(agent.engine.id);
-        if (!engine) continue;
-
-        const input: EngineInput = {
-          councilId: this.state.councilId,
+        const output = yield* this.generateWithToolsStream(
           turnId,
           agent,
-          mode: 'oracle',
+          'oracle',
           event,
-          history: [...this.state.messages, ...pendingMessages],
-        };
+          [...this.state.messages, ...pendingMessages],
+          options
+        );
 
-        const output = await engine.generate(input);
-
-        if (output.content.trim()) {
+        if (output && output.content.trim()) {
           privateThoughts.push({ agent, content: output.content });
 
           const message: CouncilMessage = {
@@ -938,7 +1455,10 @@ Your public response (or say nothing if you have nothing to add):`;
           turnId,
           agentId: agent.id,
           timestamp: new Date().toISOString(),
-          error: { message: error instanceof Error ? error.message : String(error) },
+          error: {
+            code: 'agent_execution_failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
         };
       }
 
@@ -964,9 +1484,6 @@ Your public response (or say nothing if you have nothing to add):`;
       };
 
       try {
-        const engine = this.engines.get(synthesisAgent.engine.id);
-        if (!engine) throw new Error('Synthesis engine not found');
-
         const oraclePrompt = `You are the Oracle, speaking with one unified voice for the council.
 
 Private deliberation from council members:
@@ -974,18 +1491,16 @@ ${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
 
 Synthesize a single, unified response that represents the council's collective wisdom:`;
 
-        const input: EngineInput = {
-          councilId: this.state.councilId,
+        const output = yield* this.generateWithToolsStream(
           turnId,
-          agent: synthesisAgent,
-          mode: 'oracle',
-          event: { ...event, content: oraclePrompt },
-          history: [...this.state.messages, ...pendingMessages],
-        };
+          synthesisAgent,
+          'oracle',
+          { ...event, content: oraclePrompt },
+          [...this.state.messages, ...pendingMessages],
+          options
+        );
 
-        const output = await engine.generate(input);
-
-        if (output.content.trim()) {
+        if (output && output.content.trim()) {
           const message: CouncilMessage = {
             id: generateId(),
             turnId,
@@ -1013,7 +1528,10 @@ Synthesize a single, unified response that represents the council's collective w
           turnId,
           agentId: 'oracle',
           timestamp: new Date().toISOString(),
-          error: { message: error instanceof Error ? error.message : String(error) },
+          error: {
+            code: 'oracle_synthesis_failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
         };
       }
 

@@ -4,13 +4,15 @@ import {
   OpenCouncilInput,
   Council,
   AgentDefinition,
+  EngineAdapter,
+  ToolHost,
 } from './types.js';
 import { CouncilImpl } from './CouncilImpl.js';
 
 class CouncilModuleImpl implements CouncilModule {
   private agents: AgentDefinition[];
-  private engines: Record<string, any>;
-  private toolHost: any;
+  private engines: Record<string, EngineAdapter>;
+  private toolHost?: ToolHost;
 
   constructor(config: CouncilModuleConfig) {
     this.agents = config.agents;

@@ -26,6 +26,25 @@ export interface ToolProbeResult {
 
 export type CouncilMode = 'open' | 'council' | 'oracle';
 
+export interface CouncilError {
+  message: string;
+  code?: string;
+  data?: unknown;
+}
+
+export interface TurnError {
+  agentId?: string;
+  error: CouncilError;
+}
+
+export interface ToolDefinition {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export type ToolRef = string | ToolDefinition;
+
 export interface EngineSpec {
   id: string;
   provider?: string;
@@ -41,7 +60,7 @@ export interface AgentDefinition {
   modelName: string;
   summary: string;
   systemPrompt: string;
-  tools?: string[];
+  tools?: ToolRef[];
   metadata?: Record<string, unknown>;
 }
 
@@ -78,12 +97,14 @@ export interface CouncilMessage {
 }
 
 export interface ToolCall {
+  id?: string;
   name: string;
   args?: Record<string, unknown>;
 }
 
 export interface ToolResult {
   ok: boolean;
+  callId?: string;
   content?: string;
   data?: unknown;
   error?: string;
@@ -106,11 +127,15 @@ export interface EngineInput {
   mode: CouncilMode;
   event: ChatEvent;
   history: CouncilMessage[];
+  tools?: ToolDefinition[];
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResult[];
 }
 
 export interface EngineOutput {
   content: string;
   metadata?: Record<string, unknown>;
+  toolCalls?: ToolCall[];
 }
 
 export interface EngineAdapter {
@@ -176,6 +201,15 @@ export type CouncilRecord =
       turnId: string;
       timestamp: string;
       mode: CouncilMode;
+    }
+  | {
+      contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+      type: 'error';
+      councilId: string;
+      turnId: string;
+      timestamp: string;
+      agentId?: string;
+      error: CouncilError;
     };
 
 export type CouncilReplayEntry =
@@ -195,6 +229,7 @@ export interface TurnResult {
   publicMessages: CouncilMessage[];
   privateMessages: CouncilMessage[];
   records: CouncilRecord[];
+  errors: TurnError[];
 }
 
 export type CouncilRuntimeEvent =
@@ -265,11 +300,7 @@ export type CouncilRuntimeEvent =
       turnId?: string;
       agentId?: string;
       timestamp: string;
-      error: {
-        message: string;
-        code?: string;
-        data?: unknown;
-      };
+      error: CouncilError;
     };
 
 export interface Council {

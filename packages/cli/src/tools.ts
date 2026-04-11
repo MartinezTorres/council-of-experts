@@ -1,93 +1,72 @@
 /**
- * CLI ToolHost implementation
+ * CLI ToolHost implementation and built-in tool catalog.
  */
 
-import type { ToolHost, ToolCall, ToolResult, ToolExecutionContext } from 'council-of-experts';
+import { readFile, readdir, stat } from 'fs/promises';
+import path from 'path';
+import type {
+  ToolDefinition,
+  ToolExecutionContext,
+  ToolCall,
+  ToolHost,
+  ToolResult,
+} from 'council-of-experts';
 
-/**
- * Simple in-memory document store for CLI
- */
-class DocumentStore {
-  private documents = new Map<string, string>();
+export const CLI_TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
+  ls: {
+    name: 'ls',
+    description: 'List files and directories within the configured workspace root.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path to list. Defaults to the workspace root.',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  cat: {
+    name: 'cat',
+    description: 'Read a UTF-8 text file within the configured workspace root.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Relative path to the file to read.',
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+};
 
-  get(councilId: string): string {
-    return this.documents.get(councilId) || '';
-  }
-
-  set(councilId: string, content: string): void {
-    this.documents.set(councilId, content);
-  }
+export function getCLIToolDefinition(name: string): ToolDefinition | undefined {
+  return CLI_TOOL_DEFINITIONS[name];
 }
 
-/**
- * Simple chat history store for CLI
- */
-export interface ChatMessage {
-  role: 'user' | 'agent';
-  name: string;
-  content: string;
-  timestamp: string;
-}
-
-export class ChatHistory {
-  private messages: ChatMessage[] = [];
-
-  addMessage(role: 'user' | 'agent', name: string, content: string): void {
-    this.messages.push({
-      role,
-      name,
-      content,
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  getMessages(): ChatMessage[] {
-    return [...this.messages];
-  }
-
-  getRecentMessages(count: number): ChatMessage[] {
-    return this.messages.slice(-count);
-  }
-
-  getFormattedHistory(count: number = 10): string {
-    return this.getRecentMessages(count)
-      .map((m) => `${m.name}: ${m.content}`)
-      .join('\n');
-  }
-
-  clear(): void {
-    this.messages = [];
-  }
-}
-
-/**
- * ToolHost implementation for CLI
- */
 export class CLIToolHost implements ToolHost {
-  private documentStore = new DocumentStore();
+  private readonly rootDir: string;
+  private readonly maxBytes = 100_000;
 
-  constructor(
-    private chatHistory: ChatHistory,
-    private agentMetadata: Map<string, { name: string; icon: string; summary: string }>
-  ) {}
+  constructor(rootDir: string = process.cwd()) {
+    this.rootDir = path.resolve(rootDir);
+  }
 
-  async execute(call: ToolCall, ctx: ToolExecutionContext): Promise<ToolResult> {
+  async execute(
+    call: ToolCall,
+    _ctx: ToolExecutionContext
+  ): Promise<ToolResult> {
     try {
       switch (call.name) {
-        case 'read_document':
-          return this.readDocument(ctx);
+        case 'ls':
+          return await this.listFiles(call);
 
-        case 'write_document':
-          return this.writeDocument(call, ctx);
-
-        case 'list_participants':
-          return this.listParticipants();
-
-        case 'get_context':
-          return this.getContext(call);
-
-        case 'my_role':
-          return this.myRole(ctx);
+        case 'cat':
+          return await this.readFile(call);
 
         default:
           return {
@@ -103,63 +82,57 @@ export class CLIToolHost implements ToolHost {
     }
   }
 
-  private readDocument(ctx: ToolExecutionContext): ToolResult {
-    const content = this.documentStore.get(ctx.councilId);
+  private resolvePath(requestedPath?: string): string | null {
+    const target =
+      requestedPath && requestedPath.trim().length > 0 ? requestedPath : '.';
+    const resolved = path.resolve(this.rootDir, target);
+    if (resolved === this.rootDir) return resolved;
+    if (resolved.startsWith(this.rootDir + path.sep)) return resolved;
+    return null;
+  }
+
+  private async listFiles(call: ToolCall): Promise<ToolResult> {
+    const target = this.resolvePath(call.args?.path as string | undefined);
+    if (!target) {
+      return { ok: false, error: 'Path is outside allowed root' };
+    }
+
+    const entries = await readdir(target, { withFileTypes: true });
+    const lines = entries
+      .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+      .sort((a, b) => a.localeCompare(b));
+
     return {
       ok: true,
-      content: content || '(empty document)',
+      content: lines.length > 0 ? lines.join('\n') : '(empty directory)',
     };
   }
 
-  private writeDocument(call: ToolCall, ctx: ToolExecutionContext): ToolResult {
-    const content = call.args?.content as string;
-    if (!content || typeof content !== 'string') {
+  private async readFile(call: ToolCall): Promise<ToolResult> {
+    const requestedPath = call.args?.path as string | undefined;
+    if (!requestedPath || typeof requestedPath !== 'string') {
+      return { ok: false, error: 'Missing required argument: path (string)' };
+    }
+
+    const target = this.resolvePath(requestedPath);
+    if (!target) {
+      return { ok: false, error: 'Path is outside allowed root' };
+    }
+
+    const fileStat = await stat(target);
+    if (!fileStat.isFile()) {
+      return { ok: false, error: 'Path is not a file' };
+    }
+
+    const content = await readFile(target, 'utf8');
+    if (Buffer.byteLength(content, 'utf8') > this.maxBytes) {
+      const truncated = content.slice(0, this.maxBytes);
       return {
-        ok: false,
-        error: 'Missing required argument: content (string)',
+        ok: true,
+        content: `${truncated}\n\n...[truncated after ${this.maxBytes} bytes]`,
       };
     }
 
-    this.documentStore.set(ctx.councilId, content);
-    return {
-      ok: true,
-      content: `Document updated (${content.length} characters)`,
-    };
-  }
-
-  private listParticipants(): ToolResult {
-    const participants = Array.from(this.agentMetadata.values())
-      .map((a) => `${a.icon} ${a.name}: ${a.summary}`)
-      .join('\n');
-
-    return {
-      ok: true,
-      content: participants || '(no agents configured)',
-    };
-  }
-
-  private getContext(call: ToolCall): ToolResult {
-    const count = (call.args?.count as number) || 5;
-    const history = this.chatHistory.getFormattedHistory(count);
-
-    return {
-      ok: true,
-      content: history || '(no conversation history)',
-    };
-  }
-
-  private myRole(ctx: ToolExecutionContext): ToolResult {
-    const agent = this.agentMetadata.get(ctx.agentId);
-    if (!agent) {
-      return {
-        ok: false,
-        error: 'Unknown agent',
-      };
-    }
-
-    return {
-      ok: true,
-      content: `You are ${agent.icon} ${agent.name}. Your role: ${agent.summary}`,
-    };
+    return { ok: true, content };
   }
 }

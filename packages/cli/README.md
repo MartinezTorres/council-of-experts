@@ -1,13 +1,13 @@
 # @council-of-experts/cli
 
-Interactive CLI chat interface for council-of-experts. Demonstrates the library with a simple command-line application.
+Interactive CLI for `council-of-experts`.
 
-## Features
+This package is a thin demo shell around the core runtime:
+- it loads agent and engine config from JSON
+- it opens an in-memory council session
+- it exposes a small built-in file inspection toolset (`ls`, `cat`)
 
-- **Multi-agent chat**: Mention agents with `@AgentName` to invoke them
-- **Document collaboration**: Agents can read and edit a shared document
-- **Tool system**: Agents have access to document, context, and introspection tools
-- **In-memory session**: Ephemeral - no persistence between runs
+It is intentionally ephemeral. There is no persistence between runs.
 
 ## Quick Start
 
@@ -17,132 +17,80 @@ Interactive CLI chat interface for council-of-experts. Demonstrates the library 
 npm install
 ```
 
-### 2. Create config file
+### 2. Create a config file
 
-Copy `config.example.json` to `config.json` and edit:
-
-```json
-{
-  "models": [
-    {
-      "name": "local-llm",
-      "url": "http://localhost:1234/v1",
-      "api_key": "",
-      "model": "your-model-name"
-    }
-  ],
-  "agents": [
-    {
-      "name": "Analyst",
-      "icon": "📊",
-      "purpose": "Analyzes data and provides insights",
-      "system_prompt": "You are an analytical expert...",
-      "model": "local-llm",
-      "temperature": 0.7
-    }
-  ]
-}
-```
+Copy `config.example.json` to `config.json` and adjust the engine URL/model.
 
 ### 3. Run the CLI
 
 ```bash
-npm run dev
+npm run dev config.json
 ```
 
 Or build and run:
 
 ```bash
 npm run build
-npm start
+npm start config.json
 ```
 
-## Usage
+## Commands
 
-### Commands
+- `/mode <open|council|oracle>` changes the active council mode
+- `/status` prints the current council status snapshot
+- `/messages [public|private]` prints stored council messages
+- `/clear` resets the in-memory session
+- `/help` shows command help
+- `/quit` exits
 
-- `@AgentName message` - Mention an agent to invoke them
-- `/doc` - View current document
-- `/clear` - Clear conversation history
-- `/help` - Show help
-- `/quit` - Exit
+## Built-In Tools
 
-### Example Session
+- `ls` lists files or directories relative to the configured workspace root
+- `cat` reads a UTF-8 text file relative to the configured workspace root
 
-```
-> @Writer create a haiku about AI
-
-✍️ Writer:
-Silicon minds wake
-Patterns dance in digital streams
-Wisdom emerges
-
-> @Reviewer what do you think?
-
-🔍 Reviewer:
-The haiku captures the essence well. The imagery of "silicon minds"
-and "digital streams" effectively conveys the AI theme. Consider if
-"wisdom emerges" might be strengthened with a more specific observation.
-
-> /doc
-==================================================
-CURRENT DOCUMENT:
-==================================================
-Silicon minds wake
-Patterns dance in digital streams
-Wisdom emerges
-==================================================
-```
-
-## Available Tools
-
-Agents have access to these tools:
-
-- **read_document** - Read the current document
-- **write_document** - Replace document content
-- **list_participants** - See all agents
-- **get_context** - View conversation history
-- **my_role** - Introspection (who am I?)
+The CLI automatically expands those tool names into full tool definitions before
+passing them to the runtime.
 
 ## Configuration
 
-### Environment Variables
+The config file uses this shape:
 
-- `COUNCIL_CONFIG` - Path to config file (default: `./config.json`)
-
-### Config File
-
-See `config.example.json` for full structure:
-
-- `models` - AI model configurations (OpenAI-compatible APIs)
-- `agents` - Agent definitions (name, purpose, system prompt, etc.)
-- `timeout_ms` - API timeout (default: 60000)
-- `verbose` - Enable verbose logging (default: false)
-- `initial_document` - Starting document content
+```json
+{
+  "workspaceRoot": ".",
+  "engines": [
+    {
+      "id": "local-llm",
+      "provider": "http://localhost:1234",
+      "model": "your-model-name",
+      "contextWindow": 8192,
+      "settings": {
+        "api_key": "",
+        "temperature": 0.2
+      }
+    }
+  ],
+  "agents": [
+    {
+      "id": "repo-analyst",
+      "name": "Repo Analyst",
+      "icon": "📦",
+      "engine": "local-llm",
+      "summary": "Inspects repository structure and architecture",
+      "systemPrompt": "You inspect codebases carefully. Use ls to explore directories and cat to read relevant files before answering.",
+      "tools": ["ls", "cat"]
+    }
+  ],
+  "timeout_ms": 60000
+}
+```
 
 ## Architecture
 
-The CLI demonstrates clean separation of concerns:
-
-- **Providers** - In-memory implementations of council-of-experts interfaces
-- **Tools** - Basic document/context/introspection tools
-- **Chat Loop** - Interactive readline interface
-- **Config** - JSON-based configuration
-
-This structure shows how to integrate council-of-experts into any application.
-
-## Development
-
-```bash
-# Run in dev mode with auto-reload
-npm run dev
-
-# Build TypeScript
-npm run build
-
-# Run built version
-npm start config.json
-```
+- `src/index.ts` wires config, engines, tool host, and the CLI session together
+- `src/session.ts` owns the in-memory council lifecycle for the interactive shell
+- `src/tools.ts` defines the built-in CLI tools and their host implementation
+- `src/chat.ts` is just the readline user interface
 
 ## License
 

@@ -8,9 +8,10 @@
 import { createCouncilModule } from 'council-of-experts';
 import type { EngineAdapter } from 'council-of-experts';
 import { ChatLoop } from './chat.js';
-import { ChatHistory, CLIToolHost } from './tools.js';
+import { CLIToolHost } from './tools.js';
 import { loadConfig, getDefaultConfigPath, buildAgentDefinitions } from './config.js';
 import { ChatCompletionsEngine } from './ChatCompletionsEngine.js';
+import { CouncilSession } from './session.js';
 
 async function main() {
   // Parse command line arguments
@@ -40,23 +41,8 @@ async function main() {
     );
   }
 
-  // Create chat history
-  const chatHistory = new ChatHistory();
-
-  // Build agent metadata map for tools
-  const agentMetadata = new Map(
-    agentDefinitions.map((a) => [
-      a.id,
-      {
-        name: a.name,
-        icon: a.metadata?.icon as string || '🤖',
-        summary: a.summary,
-      },
-    ])
-  );
-
   // Create tool host
-  const toolHost = new CLIToolHost(chatHistory, agentMetadata);
+  const toolHost = new CLIToolHost(config.workspaceRoot || process.cwd());
 
   // Create council module
   const councilModule = createCouncilModule({
@@ -67,14 +53,11 @@ async function main() {
 
   console.log(`\nInitialized ${agentDefinitions.length} agents`);
 
-  // Open council
-  const council = await councilModule.openCouncil({
-    councilId: 'cli-session',
-    initialMode: 'open',
-  });
+  const session = new CouncilSession(councilModule, 'open');
+  await session.initialize();
 
   // Start chat loop
-  const chat = new ChatLoop(council, chatHistory, agentDefinitions);
+  const chat = new ChatLoop(session, agentDefinitions);
   await chat.start();
 }
 

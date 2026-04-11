@@ -183,6 +183,14 @@ for await (const event of council.stream(chatEvent)) {
 }
 ```
 
+## Tool Calling
+
+Engine adapters can request tools by returning `EngineOutput.toolCalls`. The council executes those calls through `ToolHost`, emits `tool.called` / `tool.result` records (and stream events), then calls the engine again with `EngineInput.toolCalls` + `EngineInput.toolResults` for the current turn.
+
+Tools are only executed if the tool name appears in `agent.tools`. You can provide richer tool definitions (name/description/parameters) as `ToolDefinition` entries in `agent.tools`, which are passed to the engine as `EngineInput.tools`.
+
+`TurnOptions.maxRounds` limits tool-call round trips per agent (default 3).
+
 ## Inspecting Private Channel
 
 ```typescript
@@ -231,9 +239,11 @@ Creates a council module.
 interface TurnResult {
   turnId: string;
   mode: CouncilMode;
+  nextMode?: CouncilMode;
   publicMessages: CouncilMessage[];
   privateMessages: CouncilMessage[];
   records: CouncilRecord[];  // PERSIST THESE
+  errors: TurnError[];
 }
 ```
 
@@ -266,7 +276,7 @@ npm start config.example.json
     "engine": "local-llm",
     "summary": "Data analysis expert",
     "systemPrompt": "You are an expert...",
-    "tools": ["read_document"]
+    "tools": ["ls", "cat"]
   }]
 }
 ```

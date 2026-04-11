@@ -65,6 +65,7 @@ interface TurnResult {
   publicMessages: CouncilMessage[];
   privateMessages: CouncilMessage[];
   records: CouncilRecord[];  // MUST be persisted by host
+  errors: TurnError[];
 }
 ```
 
@@ -79,9 +80,17 @@ interface AgentDefinition {
   modelName: string;
   summary: string;
   systemPrompt: string;
-  tools?: string[];
+  tools?: ToolRef[];
   metadata?: Record<string, unknown>;
 }
+
+interface ToolDefinition {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+type ToolRef = string | ToolDefinition;
 
 // Engine specification
 interface EngineSpec {
@@ -136,11 +145,15 @@ interface EngineInput {
   mode: CouncilMode;
   event: ChatEvent;
   history: CouncilMessage[];
+  tools?: ToolDefinition[];
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResult[];
 }
 
 interface EngineOutput {
   content: string;
   metadata?: Record<string, unknown>;
+  toolCalls?: ToolCall[];
 }
 ```
 
@@ -152,6 +165,7 @@ interface ToolHost {
 }
 
 interface ToolCall {
+  id?: string;
   name: string;
   args?: Record<string, unknown>;
 }
@@ -164,11 +178,32 @@ interface ToolExecutionContext {
 
 interface ToolResult {
   ok: boolean;
+  callId?: string;
   content?: string;
   data?: unknown;
   error?: string;
 }
+
+interface CouncilError {
+  message: string;
+  code?: string;
+  data?: unknown;
+}
+
+interface TurnError {
+  agentId?: string;
+  error: CouncilError;
+}
 ```
+
+### Tool Calling Flow
+
+- The engine adapter can request tools by returning `EngineOutput.toolCalls`.
+- The council executes them via `ToolHost` and emits `tool.called` / `tool.result` records and runtime events.
+- The engine is called again with `EngineInput.toolCalls` + `EngineInput.toolResults` for the current turn.
+- Tool calls are executed only if the tool name is present in `agent.tools`.
+- `TurnOptions.maxRounds` limits tool-call round trips per agent (default 3).
+- Non-stream execution failures are surfaced in `TurnResult.errors` and durable `error` records.
 
 ## Operating Modes
 

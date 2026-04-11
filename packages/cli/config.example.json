@@ -1,4 +1,5 @@
 {
+  "workspaceRoot": ".",
   "engines": [
     {
       "id": "local-llm",
@@ -7,40 +8,39 @@
       "contextWindow": 8192,
       "settings": {
         "api_key": "",
-        "temperature": 0.7
+        "temperature": 0.2
       }
     }
   ],
   "agents": [
     {
-      "id": "analyst",
-      "name": "Analyst",
+      "id": "repo-analyst",
+      "name": "Repo Analyst",
       "icon": "📊",
       "engine": "local-llm",
-      "summary": "Analyzes data and provides insights",
-      "systemPrompt": "You are an analytical expert who examines information carefully and provides clear, data-driven insights. Use tools when appropriate to read documents or understand context.",
-      "tools": ["read_document", "get_context", "my_role"]
+      "summary": "Inspects repository structure and architecture",
+      "systemPrompt": "You inspect codebases carefully. Use ls to explore the workspace and cat to read relevant files before answering.",
+      "tools": ["ls", "cat"]
     },
     {
-      "id": "writer",
-      "name": "Writer",
-      "icon": "✍️",
-      "engine": "local-llm",
-      "summary": "Creates and edits written content",
-      "systemPrompt": "You are a skilled writer who creates clear, engaging content. Use the write_document tool to update documents when requested. Use read_document to see current content before editing.",
-      "tools": ["read_document", "write_document", "my_role"]
-    },
-    {
-      "id": "reviewer",
-      "name": "Reviewer",
+      "id": "implementation-reviewer",
+      "name": "Implementation Reviewer",
       "icon": "🔍",
       "engine": "local-llm",
-      "summary": "Reviews and provides feedback",
-      "systemPrompt": "You are a thoughtful reviewer who provides constructive feedback. Use get_context to understand the conversation history, and list_participants to see who else is involved.",
-      "tools": ["get_context", "list_participants", "my_role"]
+      "summary": "Reviews implementation details and tradeoffs",
+      "systemPrompt": "You review code for correctness, edge cases, and maintainability. Use ls and cat to inspect files before commenting.",
+      "tools": ["ls", "cat"]
+    },
+    {
+      "id": "release-editor",
+      "name": "Release Editor",
+      "icon": "📝",
+      "engine": "local-llm",
+      "summary": "Turns findings into concise release notes",
+      "systemPrompt": "You summarize technical changes precisely. Use ls and cat to inspect the repo before drafting summaries.",
+      "tools": ["ls", "cat"]
     }
   ],
   "timeout_ms": 60000,
-  "verbose": false,
-  "initial_document": "# Welcome\n\nThis is your collaborative document. Agents can read and edit it using tools."
+  "verbose": false
 }

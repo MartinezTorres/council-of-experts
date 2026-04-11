@@ -4,23 +4,56 @@
  * completions API shape (e.g. llama.cpp, Ollama, LM Studio, vLLM, etc.)
  */
 
-import type { EngineAdapter, EngineInput, EngineOutput } from 'council-of-experts';
+import type {
+  EngineAdapter,
+  EngineInput,
+  EngineOutput,
+  ToolCall,
+  ToolDefinition,
+  ToolResult,
+} from 'council-of-experts';
 
 interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
+  tool_call_id?: string;
 }
 
 interface ChatCompletionsRequest {
   model: string;
   messages: ChatMessage[];
   temperature?: number;
+  tools?: Array<{
+    type: 'function';
+    function: {
+      name: string;
+      description?: string;
+      parameters?: Record<string, unknown>;
+    };
+  }>;
+  tool_choice?: 'auto';
 }
 
 interface ChatCompletionsResponse {
   choices: Array<{
     message: {
       content: string;
+      tool_calls?: Array<{
+        id: string;
+        type: 'function';
+        function: {
+          name: string;
+          arguments: string;
+        };
+      }>;
     };
   }>;
 }
@@ -69,12 +102,59 @@ export class ChatCompletionsEngine implements EngineAdapter {
       content: `${actorName}: ${event.content}`,
     });
 
+    // Add prior tool calls/results for this turn (if any)
+    if (input.toolCalls && input.toolCalls.length > 0) {
+      const resultsById = new Map<string, ToolResult>();
+      for (const result of input.toolResults ?? []) {
+        if (result.callId) {
+          resultsById.set(result.callId, result);
+        }
+      }
+
+      for (const call of input.toolCalls) {
+        const callId = call.id ?? 'tool_call';
+        messages.push({
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: callId,
+              type: 'function',
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.args ?? {}),
+              },
+            },
+          ],
+        });
+
+        const result = resultsById.get(callId);
+        if (result) {
+          const content =
+            result.content ??
+            (result.data !== undefined ? JSON.stringify(result.data) : undefined) ??
+            result.error ??
+            '';
+          messages.push({
+            role: 'tool',
+            content,
+            tool_call_id: callId,
+          });
+        }
+      }
+    }
+
     // Build request
     const requestBody: ChatCompletionsRequest = {
       model: engineSpec.model,
       messages,
       temperature: engineSpec.settings?.temperature as number | undefined ?? 0.7,
     };
+
+    if (input.tools && input.tools.length > 0) {
+      requestBody.tools = input.tools.map((tool) => this.toOpenAITool(tool));
+      requestBody.tool_choice = 'auto';
+    }
 
     const apiKey = engineSpec.settings?.api_key as string | undefined;
     const url = `${engineSpec.provider}/v1/chat/completions`;
@@ -106,7 +186,9 @@ export class ChatCompletionsEngine implements EngineAdapter {
       }
 
       const data = (await response.json()) as ChatCompletionsResponse;
-      const content = data.choices?.[0]?.message?.content || '';
+      const message = data.choices?.[0]?.message;
+      const content = message?.content || '';
+      const toolCalls = this.parseToolCalls(message?.tool_calls);
 
       return {
         content,
@@ -114,6 +196,7 @@ export class ChatCompletionsEngine implements EngineAdapter {
           model: engineSpec.model,
           engine: engineSpec.id,
         },
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
@@ -123,5 +206,42 @@ export class ChatCompletionsEngine implements EngineAdapter {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private toOpenAITool(
+    tool: ToolDefinition
+  ): NonNullable<ChatCompletionsRequest['tools']>[number] {
+    return {
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters ?? { type: 'object', properties: {} },
+      },
+    };
+  }
+
+  private parseToolCalls(raw?: ChatCompletionsResponse['choices'][number]['message']['tool_calls']): ToolCall[] {
+    if (!raw || raw.length === 0) return [];
+    const calls: ToolCall[] = [];
+    for (const call of raw) {
+      let args: Record<string, unknown> | undefined;
+      if (call.function?.arguments) {
+        try {
+          const parsed = JSON.parse(call.function.arguments);
+          if (parsed && typeof parsed === 'object') {
+            args = parsed as Record<string, unknown>;
+          }
+        } catch {
+          args = undefined;
+        }
+      }
+      calls.push({
+        id: call.id,
+        name: call.function.name,
+        args,
+      });
+    }
+    return calls;
   }
 }
