@@ -8,10 +8,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w council-of-experts && npm run build -w @council-of-experts/cli",
+    "build": "npm run build -w council-of-experts && npm run build -w @council-of-experts/openai-provider && npm run build -w @council-of-experts/cli",
     "test": "npm run test --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
-    "demo:local-cli": "npm run build && node packages/cli/dist/index.js packages/cli/config.local-provider.example.json"
+    "demo:local-cli": "npm run build && node packages/cli/dist/index.js packages/cli/config.local-provider.example.json",
+    "demo:openai-provider": "npm run build && node packages/openai-provider/dist/index.js packages/openai-provider/config.example.json"
   },
   "keywords": [
     "ai-agents",

@@ -1,0 +1,36 @@
+{
+  "name": "@council-of-experts/openai-provider",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenAI-compatible provider powered by council-of-experts",
+  "main": "dist/index.js",
+  "bin": {
+    "council-openai-provider": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "test": "npm run build && node --test test/provider.test.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "council-of-experts": "file:../core"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "tsx": "^4.6.2",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "openai-compatible",
+    "multi-agent",
+    "proxy",
+    "provider",
+    "oracle"
+  ],
+  "author": "Council of Experts",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

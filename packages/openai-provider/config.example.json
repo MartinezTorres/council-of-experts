@@ -1,0 +1,82 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "apiKeys": []
+  },
+  "debug": {
+    "enabled": true
+  },
+  "virtualModels": {
+    "council-qwen-review": {
+      "description": "Oracle-style council backed by three internal reviewers",
+      "runtime": {
+        "maxRounds": 2,
+        "maxAgentReplies": 3
+      },
+      "agents": [
+        {
+          "id": "editor",
+          "name": "Editor",
+          "summary": "Synthesizes discussion into one final answer",
+          "systemPrompt": "You synthesize technical discussion into one clean final response.",
+          "documents": [
+            {
+              "path": "../../docs/API.md",
+              "description": "Core API reference"
+            },
+            {
+              "path": "../../docs/council-of-experts-contract.md",
+              "description": "Contract and record model"
+            }
+          ],
+          "engine": {
+            "provider": "http://localhost:5815",
+            "model": "Qwen3.5-27B",
+            "contextWindow": 8192,
+            "settings": {
+              "temperature": 0
+            },
+            "timeoutMs": 90000
+          }
+        },
+        {
+          "id": "architect",
+          "name": "Architect",
+          "summary": "Focuses on architecture and system boundaries",
+          "systemPrompt": "You analyze architecture and boundaries. Respond concisely and concretely.",
+          "engine": {
+            "provider": "http://localhost:5815",
+            "model": "Qwen3.5-27B",
+            "contextWindow": 8192,
+            "settings": {
+              "temperature": 0.1
+            },
+            "timeoutMs": 90000
+          }
+        },
+        {
+          "id": "reviewer",
+          "name": "Reviewer",
+          "summary": "Focuses on correctness and regressions",
+          "systemPrompt": "You review behavior critically. Respond concisely and concretely.",
+          "documents": [
+            {
+              "path": "../../docs/council-of-experts-contract.md",
+              "description": "Contract and record model"
+            }
+          ],
+          "engine": {
+            "provider": "http://localhost:5815",
+            "model": "Qwen3.5-27B",
+            "contextWindow": 8192,
+            "settings": {
+              "temperature": 0.1
+            },
+            "timeoutMs": 90000
+          }
+        }
+      ]
+    }
+  }
+}
