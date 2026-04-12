@@ -11,6 +11,26 @@ Multi-agent AI orchestration runtime with three operating modes, private deliber
 - **Host-Owned Persistence** - Core module is 100% in-memory, host owns all storage
 - **EngineAdapter Pattern** - Bring your own AI provider implementation
 
+## Workspace Packages
+
+- `packages/core` - the published `council-of-experts` runtime library
+- `packages/cli` - interactive demo shell for local councils
+- `packages/openai-provider` - OpenAI-compatible provider app backed by oracle-mode councils
+
+## Runnable Apps
+
+- CLI demo: `npm run demo:local-cli`
+- OpenAI-compatible provider demo: `npm run demo:openai-provider`
+
+The provider app supports:
+
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- OpenAI-style client tool calls on the final outward oracle step
+- per-agent local document access via `vault.read(path)`
+
+See [packages/openai-provider/README.md](./packages/openai-provider/README.md) for the app-specific config and behavior.
+
 ## Architecture
 
 See **[docs/council-of-experts-contract.md](./docs/council-of-experts-contract.md)** for the complete specification.
