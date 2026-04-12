@@ -8,6 +8,7 @@ import type {
   ToolRef,
   ToolResult,
 } from 'council-of-experts';
+import type { DocumentVault } from './documentVault.js';
 
 export interface ProviderServerConfig {
   host?: string;
@@ -22,7 +23,8 @@ export interface ProviderDebugConfig {
 export interface ProviderEngineConfig {
   provider: string;
   model: string;
-  contextWindow: number;
+  contextWindow?: number;
+  charsPerToken?: number;
   settings?: Record<string, unknown>;
   timeoutMs?: number;
 }
@@ -78,7 +80,7 @@ export interface ResolvedProviderDebugConfig {
 export interface ResolvedVirtualModelConfig {
   id: string;
   description?: string;
-  runtime?: Partial<CouncilRuntimeConfig>;
+  runtime: CouncilRuntimeConfig;
   agents: ResolvedProviderAgentConfig[];
 }
 
@@ -92,10 +94,9 @@ export interface VirtualModelRuntime {
   id: string;
   description?: string;
   agents: AgentDefinition[];
-  documentsByAgent: Record<string, ResolvedProviderAgentDocumentConfig[]>;
+  documentVault: DocumentVault;
   councilModule: CouncilModule;
   engines: Record<string, EngineAdapter>;
-  runtime?: Partial<CouncilRuntimeConfig>;
 }
 
 export interface OpenAIFunctionTool {

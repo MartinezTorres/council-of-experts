@@ -40,10 +40,14 @@ export type {
 
 // Export constant
 export { COUNCIL_CONTRACT_VERSION } from './types.js';
-export { DEFAULT_COUNCIL_RUNTIME_CONFIG } from './config.js';
+export {
+  DEFAULT_COUNCIL_RUNTIME_CONFIG,
+  resolveCouncilRuntimeConfig,
+} from './config.js';
 
 // Export factory function
 export { createCouncilModule } from './CouncilModule.js';
+export { OpenAIChatCompletionsEngine } from './OpenAIChatCompletionsEngine.js';
 
 // Export utility functions
 export { generateId, normalizeTimestamp } from './utils.js';

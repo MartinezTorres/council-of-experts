@@ -28,6 +28,7 @@ export async function executeOracleWorkflow(
   input: ExecuteWorkflowInput,
   deps: WorkflowDependencies
 ): Promise<void> {
+  const emitPublicOracle = input.options?.emitPublicOracle !== false;
   const privateThoughts: Array<{ agent: AgentDefinition; content: string }> = [];
 
   await Promise.allSettled(
@@ -76,7 +77,11 @@ export async function executeOracleWorkflow(
     })
   );
 
-  if (privateThoughts.length === 0 || input.activeAgents.length === 0) {
+  if (
+    privateThoughts.length === 0 ||
+    input.activeAgents.length === 0 ||
+    !emitPublicOracle
+  ) {
     return;
   }
 
@@ -123,6 +128,7 @@ export async function* streamOracleWorkflow(
   input: StreamWorkflowInput,
   deps: WorkflowDependencies
 ) {
+  const emitPublicOracle = input.options?.emitPublicOracle !== false;
   const privateThoughts: Array<{ agent: AgentDefinition; content: string }> = [];
 
   for (const agent of input.activeAgents) {
@@ -161,7 +167,11 @@ export async function* streamOracleWorkflow(
     yield createAgentFinishedEvent(input.councilId, input.turnId, agent.id);
   }
 
-  if (privateThoughts.length === 0 || input.activeAgents.length === 0) {
+  if (
+    privateThoughts.length === 0 ||
+    input.activeAgents.length === 0 ||
+    !emitPublicOracle
+  ) {
     return;
   }
 

@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import {
   createCouncilModule,
   generateId,
+  OpenAIChatCompletionsEngine,
   type AgentDefinition,
   type CouncilModule,
   type EngineAdapter,
@@ -18,7 +19,6 @@ import {
   DocumentVault,
   mergeAgentTools,
 } from './documentVault.js';
-import { OpenAIChatCompletionsEngine } from './OpenAIChatCompletionsEngine.js';
 import { buildChatEvent, buildTranscript } from './transcript.js';
 import type {
   ModelStats,
@@ -263,13 +263,14 @@ export class CouncilOpenAIProviderApp {
     modelId: string,
     config: ResolvedProviderConfig['virtualModels'][string]
   ): VirtualModelRuntime {
-    const documentsByAgent = Object.fromEntries(
-      config.agents.map((agentConfig) => [
-        agentConfig.id,
-        agentConfig.documents ?? [],
-      ])
+    const documentVault = new DocumentVault(
+      Object.fromEntries(
+        config.agents.map((agentConfig) => [
+          agentConfig.id,
+          agentConfig.documents ?? [],
+        ])
+      )
     );
-    const documentVault = new DocumentVault(documentsByAgent);
     const agents: AgentDefinition[] = [];
     const engines: Record<string, EngineAdapter> = {};
 
@@ -280,6 +281,7 @@ export class CouncilOpenAIProviderApp {
         provider: agentConfig.engine.provider,
         model: agentConfig.engine.model,
         contextWindow: agentConfig.engine.contextWindow,
+        charsPerToken: agentConfig.engine.charsPerToken,
         settings: agentConfig.engine.settings,
       };
 
@@ -287,7 +289,6 @@ export class CouncilOpenAIProviderApp {
         id: agentConfig.id,
         name: agentConfig.name,
         engine: engineSpec,
-        modelName: agentConfig.engine.model,
         summary: agentConfig.summary,
         systemPrompt: agentConfig.systemPrompt,
         tools: mergeAgentTools(
@@ -313,10 +314,9 @@ export class CouncilOpenAIProviderApp {
       id: modelId,
       description: config.description,
       agents,
-      documentsByAgent,
+      documentVault,
       councilModule,
       engines,
-      runtime: config.runtime,
     };
   }
 
@@ -494,7 +494,7 @@ export class CouncilOpenAIProviderApp {
 
       const result = await council.post(
         buildChatEvent(request, requestId, transcript),
-        { mode: 'oracle' }
+        { mode: 'oracle', emitPublicOracle: false }
       );
       const status = await council.getStatus();
       const councilConfig = council.getConfig();
@@ -533,11 +533,8 @@ export class CouncilOpenAIProviderApp {
       };
       trace.synthesis = {
         agentId: synthesis.agent.id,
-        localDocuments: (runtime.documentsByAgent[synthesis.agent.id] ?? []).map(
-          (document) => ({
-            path: document.path,
-            description: document.description,
-          })
+        localDocuments: runtime.documentVault.listDocumentsForAgent(
+          synthesis.agent.id
         ),
         localToolCalls:
           synthesis.localToolCalls.length > 0 ? synthesis.localToolCalls : undefined,
@@ -647,8 +644,7 @@ export class CouncilOpenAIProviderApp {
       throw new Error(`Engine ${agent.engine.id} not found for agent ${agent.id}`);
     }
 
-    const documentVault = new DocumentVault(input.runtime.documentsByAgent);
-    const localTool = documentVault.getToolForAgent(agent.id);
+    const localTool = input.runtime.documentVault.getToolForAgent(agent.id);
 
     let draftOutput: EngineOutput | undefined;
     let localToolCalls: ToolCall[] = [];
@@ -663,7 +659,7 @@ export class CouncilOpenAIProviderApp {
         transcript: input.transcript,
         privateMessages: input.privateMessages,
         localTool,
-        documentVault,
+        documentVault: input.runtime.documentVault,
       });
 
       draftOutput = preparation.output;
@@ -868,10 +864,15 @@ export class CouncilOpenAIProviderApp {
       virtualModels: Array.from(this.modelRuntimes.values()).map((runtime) => ({
         id: runtime.id,
         description: runtime.description,
-        runtime: runtime.runtime,
+        runtime: runtime.councilModule.getConfig().runtime,
         stats: this.stats.get(runtime.id),
         agents: runtime.agents,
-        documentsByAgent: runtime.documentsByAgent,
+        documentsByAgent: Object.fromEntries(
+          runtime.agents.map((agent) => [
+            agent.id,
+            runtime.documentVault.listDocumentsForAgent(agent.id),
+          ])
+        ),
       })),
       recentRequestCount: this.recentTraces.length,
     };

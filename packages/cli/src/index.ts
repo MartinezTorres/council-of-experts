@@ -7,11 +7,9 @@
 
 import path from 'path';
 import { createCouncilModule } from 'council-of-experts';
-import type { EngineAdapter } from 'council-of-experts';
 import { ChatLoop } from './chat.js';
 import { CLIToolHost } from './tools.js';
-import { loadConfig, getDefaultConfigPath, buildAgentDefinitions } from './config.js';
-import { ChatCompletionsEngine } from './ChatCompletionsEngine.js';
+import { buildCouncilSetup, loadConfig, getDefaultConfigPath } from './config.js';
 import { CouncilSession } from './session.js';
 
 async function main() {
@@ -31,34 +29,25 @@ async function main() {
     process.exit(1);
   }
 
-  // Build agent definitions from config
-  const agentDefinitions = buildAgentDefinitions(config);
-  const workspaceRoot = path.resolve(
-    path.dirname(configPath),
-    config.workspaceRoot || '.'
-  );
-
-  // Create engines map
-  const engines: Record<string, EngineAdapter> = {};
-  for (const engineConfig of config.engines) {
-    engines[engineConfig.id] = new ChatCompletionsEngine(
-      config.timeout_ms || 60000
-    );
-  }
+  const { agents: agentDefinitions, engines } = buildCouncilSetup(config);
 
   // Create tool host
-  const toolHost = new CLIToolHost(workspaceRoot);
+  const toolHost = new CLIToolHost(config.workspaceRoot);
 
   // Create council module
   const councilModule = createCouncilModule({
     agents: agentDefinitions,
     engines,
     toolHost,
+    runtime: config.runtime,
   });
 
   console.log(`\nInitialized ${agentDefinitions.length} agents`);
 
-  const session = new CouncilSession(councilModule, 'open');
+  const session = new CouncilSession(
+    councilModule,
+    config.runtime.initialMode
+  );
   await session.initialize();
 
   // Start chat loop

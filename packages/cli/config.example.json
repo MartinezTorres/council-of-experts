@@ -1,46 +1,59 @@
 {
   "workspaceRoot": "../..",
-  "engines": [
-    {
-      "id": "local-llm",
-      "provider": "http://localhost:1234",
-      "model": "your-model-name",
-      "contextWindow": 8192,
-      "settings": {
-        "api_key": "",
-        "temperature": 0.2
-      }
-    }
-  ],
+  "runtime": {
+    "initialMode": "open"
+  },
   "agents": [
     {
       "id": "repo-analyst",
       "name": "Repo Analyst",
       "icon": "📊",
-      "engine": "local-llm",
       "summary": "Inspects repository structure and architecture",
       "systemPrompt": "You inspect codebases carefully. Use ls to explore the workspace and cat to read relevant files before answering.",
-      "tools": ["ls", "cat"]
+      "tools": ["ls", "cat"],
+      "engine": {
+        "provider": "http://localhost:1234",
+        "model": "your-model-name",
+        "settings": {
+          "api_key": "",
+          "temperature": 0.2
+        },
+        "timeoutMs": 60000
+      }
     },
     {
       "id": "implementation-reviewer",
       "name": "Implementation Reviewer",
       "icon": "🔍",
-      "engine": "local-llm",
       "summary": "Reviews implementation details and tradeoffs",
       "systemPrompt": "You review code for correctness, edge cases, and maintainability. Use ls and cat to inspect files before commenting.",
-      "tools": ["ls", "cat"]
+      "tools": ["ls", "cat"],
+      "engine": {
+        "provider": "http://localhost:1234",
+        "model": "your-model-name",
+        "settings": {
+          "api_key": "",
+          "temperature": 0.2
+        },
+        "timeoutMs": 60000
+      }
     },
     {
       "id": "release-editor",
       "name": "Release Editor",
       "icon": "📝",
-      "engine": "local-llm",
       "summary": "Turns findings into concise release notes",
       "systemPrompt": "You summarize technical changes precisely. Use ls and cat to inspect the repo before drafting summaries.",
-      "tools": ["ls", "cat"]
+      "tools": ["ls", "cat"],
+      "engine": {
+        "provider": "http://localhost:1234",
+        "model": "your-model-name",
+        "settings": {
+          "api_key": "",
+          "temperature": 0.2
+        },
+        "timeoutMs": 60000
+      }
     }
-  ],
-  "timeout_ms": 60000,
-  "verbose": false
+  ]
 }

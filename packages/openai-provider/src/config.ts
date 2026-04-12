@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'fs';
 import path from 'path';
+import { resolveCouncilRuntimeConfig } from 'council-of-experts';
 import type {
   ProviderAgentDocumentConfig,
   ProviderAgentConfig,
@@ -37,6 +38,14 @@ function assertNonNegativeInteger(value: unknown, field: string): number {
   }
 
   throw new Error(`Invalid ${field}: expected a non-negative integer`);
+}
+
+function assertPositiveNumber(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected a positive number`);
 }
 
 function resolveDocument(
@@ -114,10 +123,20 @@ function validateAgent(
     engine: {
       provider: assertNonEmptyString(agent.engine?.provider, `${prefix}.engine.provider`),
       model: assertNonEmptyString(agent.engine?.model, `${prefix}.engine.model`),
-      contextWindow: assertNonNegativeInteger(
-        agent.engine?.contextWindow,
-        `${prefix}.engine.contextWindow`
-      ),
+      contextWindow:
+        agent.engine?.contextWindow === undefined
+          ? undefined
+          : assertNonNegativeInteger(
+              agent.engine.contextWindow,
+              `${prefix}.engine.contextWindow`
+            ),
+      charsPerToken:
+        agent.engine?.charsPerToken === undefined
+          ? undefined
+          : assertPositiveNumber(
+              agent.engine.charsPerToken,
+              `${prefix}.engine.charsPerToken`
+            ),
       settings: agent.engine?.settings,
       timeoutMs:
         agent.engine?.timeoutMs === undefined
@@ -160,7 +179,7 @@ function validateVirtualModel(
       config.description === undefined
         ? undefined
         : assertNonEmptyString(config.description, `virtualModels.${modelId}.description`),
-    runtime: config.runtime,
+    runtime: resolveCouncilRuntimeConfig(config.runtime),
     agents,
   };
 }

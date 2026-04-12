@@ -58,12 +58,12 @@ npm install council-of-experts
 ## Quick Start
 
 ```typescript
-import { createCouncilModule } from 'council-of-experts';
+import {
+  createCouncilModule,
+  OpenAIChatCompletionsEngine,
+} from 'council-of-experts';
 import type {
   AgentDefinition,
-  EngineAdapter,
-  EngineInput,
-  EngineOutput,
   ToolHost,
 } from 'council-of-experts';
 
@@ -76,36 +76,15 @@ const agents: AgentDefinition[] = [
       id: 'local',
       provider: 'http://localhost:1234',
       model: 'your-model-name',
-      contextWindow: 8192,
+      charsPerToken: 4
     },
-    modelName: 'your-model-name',
     summary: 'Data analysis expert',
     systemPrompt: 'You are an analytical expert...',
     metadata: { icon: '📊' }
   }
 ];
 
-// 2. Implement EngineAdapter (example: /v1/chat/completions compatible)
-class ChatCompletionsEngine implements EngineAdapter {
-  async generate(input: EngineInput): Promise<EngineOutput> {
-    const response = await fetch(`${input.agent.engine.provider}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: input.agent.engine.model,
-        messages: [
-          { role: 'system', content: input.agent.systemPrompt },
-          { role: 'user', content: input.event.content }
-        ]
-      })
-    });
-
-    const data = await response.json();
-    return { content: data.choices[0].message.content };
-  }
-}
-
-// 3. Implement ToolHost (optional)
+// 2. Implement ToolHost (optional)
 const toolHost: ToolHost = {
   async execute(call, ctx) {
     if (call.name === 'lookup_context') {
@@ -116,10 +95,10 @@ const toolHost: ToolHost = {
   }
 };
 
-// 4. Create council module
+// 3. Create council module
 const councilModule = createCouncilModule({
   agents,
-  engines: { 'local': new ChatCompletionsEngine() },
+  engines: { 'local': new OpenAIChatCompletionsEngine() },
   toolHost,
   runtime: {
     initialMode: 'open',
@@ -127,7 +106,7 @@ const councilModule = createCouncilModule({
   }
 });
 
-// 5. Open council and post events
+// 4. Open council and post events
 const council = await councilModule.openCouncil({
   councilId: 'session-123',
   initialMode: 'open'
@@ -138,10 +117,10 @@ const result = await council.post({
   content: 'Analyze this data'
 });
 
-// 6. Persist records
+// 5. Persist records
 await yourStorage.append(result.records);
 
-// 7. Display responses
+// 6. Display responses
 for (const msg of result.publicMessages) {
   console.log(`${msg.author.name}: ${msg.content}`);
 }
@@ -170,6 +149,13 @@ const result = await council.post(event, { mode: 'oracle' });
 // Phase 1: Private agent deliberation
 // Phase 2: Unified oracle response
 // result.publicMessages contains single oracle message
+
+const privateOnly = await council.post(event, {
+  mode: 'oracle',
+  emitPublicOracle: false,
+});
+// privateOnly.privateMessages contains deliberation
+// privateOnly.publicMessages is empty
 ```
 
 ## Replay and Durability
@@ -211,6 +197,10 @@ for await (const event of council.stream(chatEvent)) {
 
 Engine adapters can request tools by returning `EngineOutput.toolCalls`. The council executes those calls through `ToolHost`, emits `tool.called` / `tool.result` records (and stream events), then calls the engine again with `EngineInput.toolCalls` + `EngineInput.toolResults` for the current turn.
 
+For OpenAI-compatible `/v1/chat/completions` servers, the core package also exports `OpenAIChatCompletionsEngine`.
+
+When `engine.charsPerToken` is configured, `OpenAIChatCompletionsEngine` also attaches approximate prompt/completion token estimates to `EngineOutput.metadata.tokenEstimate`. This is instrumentation only; it does not clip or summarize history.
+
 Tools are only executed if the tool name appears in `agent.tools`. You can provide richer tool definitions (name/description/parameters) as `ToolDefinition` entries in `agent.tools`, which are passed to the engine as `EngineInput.tools`.
 
 `TurnOptions.maxRounds` limits tool-call round trips per agent. The module-level default comes from `createCouncilModule({ runtime: { maxRounds } })`, and defaults to `3`.
@@ -246,7 +236,7 @@ Creates a council module.
 - `agents: AgentDefinition[]` - Agent definitions
 - `engines: Record<string, EngineAdapter>` - Engine implementations
 - `toolHost?: ToolHost` - Optional tool executor
-- `runtime?: Partial<CouncilRuntimeConfig>` - Optional library defaults for `initialMode`, `maxRounds`, and `maxAgentReplies`
+- `runtime?: Partial<CouncilRuntimeConfig>` - Optional runtime defaults for `initialMode`, `maxRounds`, and `maxAgentReplies`
 
 **Returns:** `CouncilModule`
 
@@ -323,21 +313,22 @@ council-of-experts/
 │   │   ├── src/
 │   │   │   ├── config.ts               # Runtime default resolution
 │   │   │   ├── types.ts                # Contract types
+│   │   │   ├── OpenAIChatCompletionsEngine.ts
 │   │   │   ├── CouncilImpl.ts          # Council implementation
 │   │   │   ├── CouncilModule.ts        # Factory
 │   │   │   ├── utils.ts
 │   │   │   └── workflows/              # Mode executors
 │   │   └── dist/
-│   └── cli/                            # Example CLI application
-│       ├── src/
-│       │   ├── index.ts
-│       │   ├── ChatCompletionsEngine.ts # EngineAdapter implementation
-│       │   ├── tools.ts                # Built-in CLI tool host
-│       │   ├── session.ts
-│       │   ├── chat.ts
-│       │   └── config.ts
-│       ├── config.example.json
-│       └── config.local-provider.example.json
+│   ├── cli/                            # Example CLI application
+│   │   ├── src/
+│   │   │   ├── index.ts
+│   │   │   ├── tools.ts                # Built-in CLI tool host
+│   │   │   ├── session.ts
+│   │   │   ├── chat.ts
+│   │   │   └── config.ts
+│   │   ├── config.example.json
+│   │   └── config.local-provider.example.json
+│   └── openai-provider/                # OpenAI-compatible provider app
 ```
 
 ## Development

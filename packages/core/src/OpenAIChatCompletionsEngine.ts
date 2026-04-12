@@ -1,9 +1,3 @@
-/**
- * /v1/chat/completions compatible EngineAdapter implementation.
- * Works with any local or remote model server that follows the OpenAI chat
- * completions API shape (e.g. llama.cpp, Ollama, LM Studio, vLLM, etc.)
- */
-
 import type {
   EngineAdapter,
   EngineInput,
@@ -11,7 +5,7 @@ import type {
   ToolCall,
   ToolDefinition,
   ToolResult,
-} from 'council-of-experts';
+} from './types.js';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -39,7 +33,16 @@ interface ChatCompletionsRequest {
       parameters?: Record<string, unknown>;
     };
   }>;
-  tool_choice?: 'auto';
+  tool_choice?:
+    | 'auto'
+    | 'none'
+    | 'required'
+    | {
+        type: 'function';
+        function: {
+          name: string;
+        };
+      };
 }
 
 interface ChatCompletionsResponse {
@@ -58,21 +61,31 @@ interface ChatCompletionsResponse {
   }>;
 }
 
-export class ChatCompletionsEngine implements EngineAdapter {
-  private timeoutMs: number;
+function estimateTokensFromText(text: string, charsPerToken: number): number {
+  return Math.max(1, Math.ceil(text.length / charsPerToken));
+}
 
-  constructor(timeoutMs: number = 60000) {
-    this.timeoutMs = timeoutMs;
-  }
+export class OpenAIChatCompletionsEngine implements EngineAdapter {
+  constructor(private readonly timeoutMs: number = 60000) {}
 
   async generate(input: EngineInput): Promise<EngineOutput> {
     const { agent, event, history, mode } = input;
     const engineSpec = agent.engine;
-
-    // Build messages array
+    if (!engineSpec.provider) {
+      throw new Error(
+        `Engine ${engineSpec.id} is missing provider; OpenAIChatCompletionsEngine requires engine.provider`
+      );
+    }
+    if (
+      engineSpec.charsPerToken !== undefined &&
+      (!Number.isFinite(engineSpec.charsPerToken) || engineSpec.charsPerToken <= 0)
+    ) {
+      throw new Error(
+        `Engine ${engineSpec.id} has invalid charsPerToken; expected a positive number`
+      );
+    }
     const messages: ChatMessage[] = [];
 
-    // System prompt with mode context
     let systemPrompt = agent.systemPrompt;
     if (mode === 'council') {
       systemPrompt += '\n\nYou are in council mode. Deliberate carefully with other agents.';
@@ -82,27 +95,27 @@ export class ChatCompletionsEngine implements EngineAdapter {
 
     messages.push({ role: 'system', content: systemPrompt });
 
-    // Add recent history: public-only in open mode, all messages in council/oracle
     const relevantHistory =
       mode === 'open'
-        ? history.filter((m) => m.visibility === 'public')
+        ? history.filter((message) => message.visibility === 'public')
         : history;
 
-    for (const msg of relevantHistory.slice(-10)) {
+    for (const message of relevantHistory) {
       messages.push({
-        role: msg.author.type === 'agent' || msg.author.type === 'oracle' ? 'assistant' : 'user',
-        content: `${msg.author.name}: ${msg.content}`,
+        role:
+          message.author.type === 'agent' || message.author.type === 'oracle'
+            ? 'assistant'
+            : 'user',
+        content: `${message.author.name}: ${message.content}`,
       });
     }
 
-    // Add current event
     const actorName = event.actor.name || event.actor.id;
     messages.push({
       role: event.actor.type === 'agent' ? 'assistant' : 'user',
       content: `${actorName}: ${event.content}`,
     });
 
-    // Add prior tool calls/results for this turn (if any)
     if (input.toolCalls && input.toolCalls.length > 0) {
       const resultsById = new Map<string, ToolResult>();
       for (const result of input.toolResults ?? []) {
@@ -135,6 +148,7 @@ export class ChatCompletionsEngine implements EngineAdapter {
             (result.data !== undefined ? JSON.stringify(result.data) : undefined) ??
             result.error ??
             '';
+
           messages.push({
             role: 'tool',
             content,
@@ -144,7 +158,6 @@ export class ChatCompletionsEngine implements EngineAdapter {
       }
     }
 
-    // Build request
     const requestBody: ChatCompletionsRequest = {
       model: engineSpec.model,
       messages,
@@ -153,13 +166,29 @@ export class ChatCompletionsEngine implements EngineAdapter {
 
     if (input.tools && input.tools.length > 0) {
       requestBody.tools = input.tools.map((tool) => this.toOpenAITool(tool));
-      requestBody.tool_choice = 'auto';
+      const requestedToolChoice = (
+        input.event.metadata as { openai_tool_choice?: ChatCompletionsRequest['tool_choice'] }
+      )?.openai_tool_choice;
+      requestBody.tool_choice = requestedToolChoice ?? 'auto';
     }
+
+    const requestBodyText = JSON.stringify(requestBody);
+    const promptTokenEstimate =
+      engineSpec.charsPerToken === undefined
+        ? undefined
+        : {
+            strategy: 'chars_per_token',
+            charsPerToken: engineSpec.charsPerToken,
+            promptChars: requestBodyText.length,
+            promptTokens: estimateTokensFromText(
+              requestBodyText,
+              engineSpec.charsPerToken
+            ),
+            contextWindow: engineSpec.contextWindow,
+          };
 
     const apiKey = engineSpec.settings?.api_key as string | undefined;
     const url = `${engineSpec.provider}/v1/chat/completions`;
-
-    // Make request with abort-based timeout
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -174,7 +203,7 @@ export class ChatCompletionsEngine implements EngineAdapter {
       const response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(requestBody),
+        body: requestBodyText,
         signal: controller.signal,
       });
 
@@ -189,12 +218,53 @@ export class ChatCompletionsEngine implements EngineAdapter {
       const message = data.choices?.[0]?.message;
       const content = message?.content || '';
       const toolCalls = this.parseToolCalls(message?.tool_calls);
+      const responseMessageText = JSON.stringify(message ?? { content: '' });
+      const completionTokenEstimate =
+        engineSpec.charsPerToken === undefined
+          ? undefined
+          : {
+              completionChars: responseMessageText.length,
+              completionTokens: estimateTokensFromText(
+                responseMessageText,
+                engineSpec.charsPerToken
+              ),
+            };
 
       return {
         content,
         metadata: {
           model: engineSpec.model,
           engine: engineSpec.id,
+          ...(promptTokenEstimate && completionTokenEstimate
+            ? {
+                tokenEstimate: {
+                  ...promptTokenEstimate,
+                  ...completionTokenEstimate,
+                  totalTokens:
+                    promptTokenEstimate.promptTokens +
+                    completionTokenEstimate.completionTokens,
+                  remainingContextTokens:
+                    engineSpec.contextWindow === undefined
+                      ? undefined
+                      : Math.max(
+                          0,
+                          engineSpec.contextWindow -
+                            promptTokenEstimate.promptTokens
+                        ),
+                  promptContextRatio:
+                    engineSpec.contextWindow === undefined
+                      ? undefined
+                      : promptTokenEstimate.promptTokens /
+                        engineSpec.contextWindow,
+                  totalContextRatio:
+                    engineSpec.contextWindow === undefined
+                      ? undefined
+                      : (promptTokenEstimate.promptTokens +
+                          completionTokenEstimate.completionTokens) /
+                        engineSpec.contextWindow,
+                },
+              }
+            : {}),
         },
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       };
@@ -202,6 +272,7 @@ export class ChatCompletionsEngine implements EngineAdapter {
       if (error instanceof Error && error.name === 'AbortError') {
         throw new Error(`Engine request timed out after ${this.timeoutMs}ms`);
       }
+
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -221,8 +292,11 @@ export class ChatCompletionsEngine implements EngineAdapter {
     };
   }
 
-  private parseToolCalls(raw?: ChatCompletionsResponse['choices'][number]['message']['tool_calls']): ToolCall[] {
+  private parseToolCalls(
+    raw?: ChatCompletionsResponse['choices'][number]['message']['tool_calls']
+  ): ToolCall[] {
     if (!raw || raw.length === 0) return [];
+
     const calls: ToolCall[] = [];
     for (const call of raw) {
       let args: Record<string, unknown> | undefined;
@@ -236,12 +310,14 @@ export class ChatCompletionsEngine implements EngineAdapter {
           args = undefined;
         }
       }
+
       calls.push({
         id: call.id,
         name: call.function.name,
         args,
       });
     }
+
     return calls;
   }
 }

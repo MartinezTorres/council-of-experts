@@ -3,7 +3,7 @@
 Interactive CLI for `council-of-experts`.
 
 This package is a thin demo shell around the core runtime:
-- it loads agent and engine config from JSON
+- it loads agent config from JSON
 - it opens an in-memory council session
 - it exposes a small built-in file inspection toolset (`ls`, `cat`)
 
@@ -90,30 +90,28 @@ The config file uses this shape:
 ```json
 {
   "workspaceRoot": "../..",
-  "engines": [
-    {
-      "id": "local-llm",
-      "provider": "http://localhost:1234",
-      "model": "your-model-name",
-      "contextWindow": 8192,
-      "settings": {
-        "api_key": "",
-        "temperature": 0.2
-      }
-    }
-  ],
+  "runtime": {
+    "initialMode": "open"
+  },
   "agents": [
     {
       "id": "repo-analyst",
       "name": "Repo Analyst",
       "icon": "📦",
-      "engine": "local-llm",
       "summary": "Inspects repository structure and architecture",
       "systemPrompt": "You inspect codebases carefully. Use ls to explore directories and cat to read relevant files before answering.",
-      "tools": ["ls", "cat"]
+      "tools": ["ls", "cat"],
+      "engine": {
+        "provider": "http://localhost:1234",
+        "model": "your-model-name",
+        "settings": {
+          "api_key": "",
+          "temperature": 0.2
+        },
+        "timeoutMs": 60000
+      }
     }
-  ],
-  "timeout_ms": 60000
+  ]
 }
 ```
 
@@ -122,7 +120,7 @@ current shell directory.
 
 ## Architecture
 
-- `src/index.ts` wires config, engines, tool host, and the CLI session together
+- `src/index.ts` wires config, tool host, and the CLI session together
 - `src/session.ts` owns the in-memory council lifecycle for the interactive shell
 - `src/tools.ts` defines the built-in CLI tools and their host implementation
 - `src/chat.ts` is just the readline user interface

@@ -165,7 +165,8 @@ export interface EngineSpec {
   id: string;
   provider?: string;
   model: string;
-  contextWindow: number;
+  contextWindow?: number;
+  charsPerToken?: number;
   settings?: Record<string, unknown>;
 }
 
@@ -173,7 +174,6 @@ export interface AgentDefinition {
   id: string;
   name: string;
   engine: EngineSpec;
-  modelName: string;
   summary: string;
   systemPrompt: string;
   tools?: ToolRef[];
@@ -287,6 +287,7 @@ export interface TurnOptions {
   mode?: CouncilMode;
   maxRounds?: number;
   maxAgentReplies?: number;
+  emitPublicOracle?: boolean;
   trace?: boolean;
 }
 

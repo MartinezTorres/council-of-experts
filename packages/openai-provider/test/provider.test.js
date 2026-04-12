@@ -5,22 +5,25 @@ import path from 'node:path';
 import test from 'node:test';
 import { CouncilOpenAIProviderApp } from '../dist/app.js';
 import { loadConfig } from '../dist/config.js';
+import { DocumentVault } from '../dist/documentVault.js';
 
-function createResult() {
+function createResult(includePublic = true) {
   return {
     turnId: 'turn-1',
     mode: 'oracle',
     nextMode: 'oracle',
-    publicMessages: [
-      {
-        id: 'public-1',
-        turnId: 'turn-1',
-        author: { type: 'oracle', id: 'oracle', name: 'Oracle' },
-        visibility: 'public',
-        content: 'final oracle answer',
-        timestamp: new Date().toISOString(),
-      },
-    ],
+    publicMessages: includePublic
+      ? [
+          {
+            id: 'public-1',
+            turnId: 'turn-1',
+            author: { type: 'oracle', id: 'oracle', name: 'Oracle' },
+            visibility: 'public',
+            content: 'final oracle answer',
+            timestamp: new Date().toISOString(),
+          },
+        ]
+      : [],
     privateMessages: [
       {
         id: 'private-1',
@@ -48,8 +51,8 @@ function createFakeCouncilModule() {
   return {
     async openCouncil() {
       return {
-        async post() {
-          return createResult();
+        async post(_event, options) {
+          return createResult(options?.emitPublicOracle !== false);
         },
         async getStatus() {
           return { mode: 'oracle', messageCount: 3 };
@@ -195,11 +198,7 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
   app.modelRuntimes.set('oracle-test', {
     id: 'oracle-test',
     description: 'Test model',
-    runtime: {
-      maxRounds: 1,
-      maxAgentReplies: 2,
-    },
-    documentsByAgent: {},
+    documentVault: new DocumentVault({}),
     agents: [
       {
         id: 'a',
@@ -243,7 +242,7 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
   assert.equal(debugStatus.virtualModels[0].stats.successCount, 1);
 
   assert.equal(app.recentTraces.length, 1);
-  assert.equal(app.recentTraces[0].council.publicMessages[0].content, 'final oracle answer');
+  assert.equal(app.recentTraces[0].council.publicMessages.length, 0);
   assert.equal(app.recentTraces[0].council.privateMessages.length, 2);
   assert.match(app.recentTraces[0].transcript, /Conversation transcript:/);
 });
@@ -297,11 +296,7 @@ test('provider returns OpenAI tool calls and can follow up from tool results sta
   app.modelRuntimes.set('oracle-tools', {
     id: 'oracle-tools',
     description: 'Tool model',
-    runtime: {
-      maxRounds: 1,
-      maxAgentReplies: 2,
-    },
-    documentsByAgent: {},
+    documentVault: new DocumentVault({}),
     agents: [
       {
         id: 'synth',
@@ -439,7 +434,7 @@ test('provider lets the oracle read assigned documents with vault.read(path)', a
   const runtime = app.modelRuntimes.get('oracle-docs');
 
   assert.ok(runtime);
-  assert.equal(runtime.documentsByAgent.editor[0].path, 'docs/brief.txt');
+  assert.equal(runtime.documentVault.listDocumentsForAgent('editor')[0].path, 'docs/brief.txt');
   assert.equal(runtime.agents[0].tools[0].name, 'vault.read');
 
   runtime.councilModule = createFakeCouncilModule();

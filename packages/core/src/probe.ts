@@ -35,7 +35,6 @@ export async function probeEngine(
     id: '_probe',
     name: 'Probe',
     engine: spec,
-    modelName: spec.model,
     summary: 'Connection probe',
     systemPrompt: 'You are a connection test agent. Follow instructions exactly.',
   };

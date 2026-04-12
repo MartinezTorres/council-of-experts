@@ -33,7 +33,6 @@
           "engine": {
             "provider": "http://localhost:5815",
             "model": "Qwen3.5-27B",
-            "contextWindow": 8192,
             "settings": {
               "temperature": 0
             },
@@ -48,7 +47,6 @@
           "engine": {
             "provider": "http://localhost:5815",
             "model": "Qwen3.5-27B",
-            "contextWindow": 8192,
             "settings": {
               "temperature": 0.1
             },
@@ -69,7 +67,6 @@
           "engine": {
             "provider": "http://localhost:5815",
             "model": "Qwen3.5-27B",
-            "contextWindow": 8192,
             "settings": {
               "temperature": 0.1
             },

@@ -85,7 +85,6 @@ interface AgentDefinition {
   id: string;
   name: string;
   engine: EngineSpec;
-  modelName: string;
   summary: string;
   systemPrompt: string;
   tools?: ToolRef[];
@@ -105,7 +104,8 @@ interface EngineSpec {
   id: string;
   provider?: string;
   model: string;
-  contextWindow: number;
+  contextWindow?: number;
+  charsPerToken?: number;
   settings?: Record<string, unknown>;
 }
 
@@ -164,6 +164,8 @@ interface EngineOutput {
   toolCalls?: ToolCall[];
 }
 ```
+
+For OpenAI-compatible `/v1/chat/completions` servers, you can use the built-in `OpenAIChatCompletionsEngine` exported by `council-of-experts`.
 
 ### ToolHost (Host Implementation)
 
@@ -240,6 +242,13 @@ Two phases: private deliberation, then unified oracle response.
 const result = await council.post(event, { mode: 'oracle' });
 // result.privateMessages - hidden agent deliberation
 // result.publicMessages - single oracle message
+
+const privateOnly = await council.post(event, {
+  mode: 'oracle',
+  emitPublicOracle: false,
+});
+// privateOnly.privateMessages - hidden agent deliberation
+// privateOnly.publicMessages - empty
 ```
 
 ## Replay Model

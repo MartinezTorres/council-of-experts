@@ -30,7 +30,7 @@ The first configured agent is used for the final outward oracle synthesis. Order
 
 Use a JSON config file such as [config.example.json](./config.example.json).
 
-Each virtual model contains its own inline agent definitions, including provider, model, context window, temperature, and prompt.
+Each virtual model contains its own inline agent definitions, including provider, model, optional context window metadata, optional `charsPerToken` estimation settings, temperature, and prompt.
 
 Agents can also declare `documents`, resolved relative to the config file. When an agent has assigned documents, the provider exposes one internal local tool to that agent:
 
@@ -41,6 +41,7 @@ Those document reads are provider-local. They are not exposed as OpenAI client `
 The first configured agent is also the outward oracle synthesizer. If the final answer needs direct document access, assign the relevant `documents` to that first agent.
 
 When debug mode is enabled, debug endpoints expose the resolved config, recent request traces, private deliberation, local `vault.read` activity, and final synthesis output.
+If an agent engine sets `charsPerToken`, those traces also include approximate token estimates in engine output metadata. The provider does not clip history based on that estimate.
 
 ## Run
 
