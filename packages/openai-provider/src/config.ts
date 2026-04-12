@@ -137,6 +137,13 @@ function validateAgent(
               agent.engine.charsPerToken,
               `${prefix}.engine.charsPerToken`
             ),
+      responseReserveTokens:
+        agent.engine?.responseReserveTokens === undefined
+          ? undefined
+          : assertNonNegativeInteger(
+              agent.engine.responseReserveTokens,
+              `${prefix}.engine.responseReserveTokens`
+            ),
       settings: agent.engine?.settings,
       timeoutMs:
         agent.engine?.timeoutMs === undefined

@@ -282,6 +282,7 @@ export class CouncilOpenAIProviderApp {
         model: agentConfig.engine.model,
         contextWindow: agentConfig.engine.contextWindow,
         charsPerToken: agentConfig.engine.charsPerToken,
+        responseReserveTokens: agentConfig.engine.responseReserveTokens,
         settings: agentConfig.engine.settings,
       };
 

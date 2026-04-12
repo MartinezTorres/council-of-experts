@@ -4,26 +4,16 @@ import type {
   EngineOutput,
   ToolCall,
   ToolDefinition,
-  ToolResult,
 } from './types.js';
-
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: {
-      name: string;
-      arguments: string;
-    };
-  }>;
-  tool_call_id?: string;
-}
+import {
+  estimateTokensFromText,
+  packOpenAIChatMessages,
+  type OpenAIChatMessage,
+} from './OpenAIChatPromptPacker.js';
 
 interface ChatCompletionsRequest {
   model: string;
-  messages: ChatMessage[];
+  messages: OpenAIChatMessage[];
   temperature?: number;
   tools?: Array<{
     type: 'function';
@@ -61,10 +51,6 @@ interface ChatCompletionsResponse {
   }>;
 }
 
-function estimateTokensFromText(text: string, charsPerToken: number): number {
-  return Math.max(1, Math.ceil(text.length / charsPerToken));
-}
-
 export class OpenAIChatCompletionsEngine implements EngineAdapter {
   constructor(private readonly timeoutMs: number = 60000) {}
 
@@ -84,88 +70,44 @@ export class OpenAIChatCompletionsEngine implements EngineAdapter {
         `Engine ${engineSpec.id} has invalid charsPerToken; expected a positive number`
       );
     }
-    const messages: ChatMessage[] = [];
-
-    let systemPrompt = agent.systemPrompt;
-    if (mode === 'council') {
-      systemPrompt += '\n\nYou are in council mode. Deliberate carefully with other agents.';
-    } else if (mode === 'oracle') {
-      systemPrompt += '\n\nYou are in oracle mode. You are part of a unified council voice.';
+    if (
+      engineSpec.responseReserveTokens !== undefined &&
+      (!Number.isInteger(engineSpec.responseReserveTokens) ||
+        engineSpec.responseReserveTokens < 0)
+    ) {
+      throw new Error(
+        `Engine ${engineSpec.id} has invalid responseReserveTokens; expected a non-negative integer`
+      );
     }
-
-    messages.push({ role: 'system', content: systemPrompt });
-
-    const relevantHistory =
-      mode === 'open'
-        ? history.filter((message) => message.visibility === 'public')
-        : history;
-
-    for (const message of relevantHistory) {
-      messages.push({
-        role:
-          message.author.type === 'agent' || message.author.type === 'oracle'
-            ? 'assistant'
-            : 'user',
-        content: `${message.author.name}: ${message.content}`,
-      });
-    }
-
+    const openAITools =
+      input.tools && input.tools.length > 0
+        ? input.tools.map((tool) => this.toOpenAITool(tool))
+        : undefined;
     const actorName = event.actor.name || event.actor.id;
-    messages.push({
-      role: event.actor.type === 'agent' ? 'assistant' : 'user',
-      content: `${actorName}: ${event.content}`,
+    const packedPrompt = packOpenAIChatMessages({
+      systemPrompt: agent.systemPrompt,
+      mode,
+      history,
+      event: {
+        role: event.actor.type === 'agent' ? 'assistant' : 'user',
+        content: `${actorName}: ${event.content}`,
+      },
+      toolCalls: input.toolCalls,
+      toolResults: input.toolResults,
+      toolSchemas: openAITools,
+      contextWindow: engineSpec.contextWindow,
+      charsPerToken: engineSpec.charsPerToken,
+      responseReserveTokens: engineSpec.responseReserveTokens,
     });
-
-    if (input.toolCalls && input.toolCalls.length > 0) {
-      const resultsById = new Map<string, ToolResult>();
-      for (const result of input.toolResults ?? []) {
-        if (result.callId) {
-          resultsById.set(result.callId, result);
-        }
-      }
-
-      for (const call of input.toolCalls) {
-        const callId = call.id ?? 'tool_call';
-        messages.push({
-          role: 'assistant',
-          content: '',
-          tool_calls: [
-            {
-              id: callId,
-              type: 'function',
-              function: {
-                name: call.name,
-                arguments: JSON.stringify(call.args ?? {}),
-              },
-            },
-          ],
-        });
-
-        const result = resultsById.get(callId);
-        if (result) {
-          const content =
-            result.content ??
-            (result.data !== undefined ? JSON.stringify(result.data) : undefined) ??
-            result.error ??
-            '';
-
-          messages.push({
-            role: 'tool',
-            content,
-            tool_call_id: callId,
-          });
-        }
-      }
-    }
 
     const requestBody: ChatCompletionsRequest = {
       model: engineSpec.model,
-      messages,
+      messages: packedPrompt.messages,
       temperature: engineSpec.settings?.temperature as number | undefined ?? 0.7,
     };
 
-    if (input.tools && input.tools.length > 0) {
-      requestBody.tools = input.tools.map((tool) => this.toOpenAITool(tool));
+    if (openAITools) {
+      requestBody.tools = openAITools;
       const requestedToolChoice = (
         input.event.metadata as { openai_tool_choice?: ChatCompletionsRequest['tool_choice'] }
       )?.openai_tool_choice;
@@ -262,6 +204,7 @@ export class OpenAIChatCompletionsEngine implements EngineAdapter {
                       : (promptTokenEstimate.promptTokens +
                           completionTokenEstimate.completionTokens) /
                         engineSpec.contextWindow,
+                  promptPack: packedPrompt.trace,
                 },
               }
             : {}),

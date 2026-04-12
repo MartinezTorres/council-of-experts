@@ -20,6 +20,7 @@ export interface CLIAgentEngineConfig {
   model: string;
   contextWindow?: number;
   charsPerToken?: number;
+  responseReserveTokens?: number;
   settings?: {
     api_key?: string;
     temperature?: number;
@@ -112,6 +113,13 @@ function validateAgent(
               agent.engine.charsPerToken,
               `${prefix}.engine.charsPerToken`
             ),
+      responseReserveTokens:
+        agent.engine?.responseReserveTokens === undefined
+          ? undefined
+          : assertNonNegativeInteger(
+              agent.engine.responseReserveTokens,
+              `${prefix}.engine.responseReserveTokens`
+            ),
       settings: agent.engine?.settings,
       timeoutMs:
         agent.engine?.timeoutMs === undefined
@@ -179,6 +187,7 @@ export function buildCouncilSetup(config: ResolvedCLIConfig): {
       model: agent.engine.model,
       contextWindow: agent.engine.contextWindow,
       charsPerToken: agent.engine.charsPerToken,
+      responseReserveTokens: agent.engine.responseReserveTokens,
       settings: agent.engine.settings,
     };
 

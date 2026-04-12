@@ -1,6 +1,4 @@
-function estimateTokensFromText(text, charsPerToken) {
-    return Math.max(1, Math.ceil(text.length / charsPerToken));
-}
+import { estimateTokensFromText, packOpenAIChatMessages, } from './OpenAIChatPromptPacker.js';
 export class OpenAIChatCompletionsEngine {
     timeoutMs;
     constructor(timeoutMs = 60000) {
@@ -16,75 +14,37 @@ export class OpenAIChatCompletionsEngine {
             (!Number.isFinite(engineSpec.charsPerToken) || engineSpec.charsPerToken <= 0)) {
             throw new Error(`Engine ${engineSpec.id} has invalid charsPerToken; expected a positive number`);
         }
-        const messages = [];
-        let systemPrompt = agent.systemPrompt;
-        if (mode === 'council') {
-            systemPrompt += '\n\nYou are in council mode. Deliberate carefully with other agents.';
+        if (engineSpec.responseReserveTokens !== undefined &&
+            (!Number.isInteger(engineSpec.responseReserveTokens) ||
+                engineSpec.responseReserveTokens < 0)) {
+            throw new Error(`Engine ${engineSpec.id} has invalid responseReserveTokens; expected a non-negative integer`);
         }
-        else if (mode === 'oracle') {
-            systemPrompt += '\n\nYou are in oracle mode. You are part of a unified council voice.';
-        }
-        messages.push({ role: 'system', content: systemPrompt });
-        const relevantHistory = mode === 'open'
-            ? history.filter((message) => message.visibility === 'public')
-            : history;
-        for (const message of relevantHistory) {
-            messages.push({
-                role: message.author.type === 'agent' || message.author.type === 'oracle'
-                    ? 'assistant'
-                    : 'user',
-                content: `${message.author.name}: ${message.content}`,
-            });
-        }
+        const openAITools = input.tools && input.tools.length > 0
+            ? input.tools.map((tool) => this.toOpenAITool(tool))
+            : undefined;
         const actorName = event.actor.name || event.actor.id;
-        messages.push({
-            role: event.actor.type === 'agent' ? 'assistant' : 'user',
-            content: `${actorName}: ${event.content}`,
+        const packedPrompt = packOpenAIChatMessages({
+            systemPrompt: agent.systemPrompt,
+            mode,
+            history,
+            event: {
+                role: event.actor.type === 'agent' ? 'assistant' : 'user',
+                content: `${actorName}: ${event.content}`,
+            },
+            toolCalls: input.toolCalls,
+            toolResults: input.toolResults,
+            toolSchemas: openAITools,
+            contextWindow: engineSpec.contextWindow,
+            charsPerToken: engineSpec.charsPerToken,
+            responseReserveTokens: engineSpec.responseReserveTokens,
         });
-        if (input.toolCalls && input.toolCalls.length > 0) {
-            const resultsById = new Map();
-            for (const result of input.toolResults ?? []) {
-                if (result.callId) {
-                    resultsById.set(result.callId, result);
-                }
-            }
-            for (const call of input.toolCalls) {
-                const callId = call.id ?? 'tool_call';
-                messages.push({
-                    role: 'assistant',
-                    content: '',
-                    tool_calls: [
-                        {
-                            id: callId,
-                            type: 'function',
-                            function: {
-                                name: call.name,
-                                arguments: JSON.stringify(call.args ?? {}),
-                            },
-                        },
-                    ],
-                });
-                const result = resultsById.get(callId);
-                if (result) {
-                    const content = result.content ??
-                        (result.data !== undefined ? JSON.stringify(result.data) : undefined) ??
-                        result.error ??
-                        '';
-                    messages.push({
-                        role: 'tool',
-                        content,
-                        tool_call_id: callId,
-                    });
-                }
-            }
-        }
         const requestBody = {
             model: engineSpec.model,
-            messages,
+            messages: packedPrompt.messages,
             temperature: engineSpec.settings?.temperature ?? 0.7,
         };
-        if (input.tools && input.tools.length > 0) {
-            requestBody.tools = input.tools.map((tool) => this.toOpenAITool(tool));
+        if (openAITools) {
+            requestBody.tools = openAITools;
             const requestedToolChoice = input.event.metadata?.openai_tool_choice;
             requestBody.tool_choice = requestedToolChoice ?? 'auto';
         }
@@ -155,6 +115,7 @@ export class OpenAIChatCompletionsEngine {
                                     : (promptTokenEstimate.promptTokens +
                                         completionTokenEstimate.completionTokens) /
                                         engineSpec.contextWindow,
+                                promptPack: packedPrompt.trace,
                             },
                         }
                         : {}),

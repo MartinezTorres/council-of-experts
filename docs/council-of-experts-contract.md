@@ -167,6 +167,7 @@ export interface EngineSpec {
   model: string;
   contextWindow?: number;
   charsPerToken?: number;
+  responseReserveTokens?: number;
   settings?: Record<string, unknown>;
 }
 

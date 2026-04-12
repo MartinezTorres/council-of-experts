@@ -179,7 +179,6 @@ test('OpenAIChatCompletionsEngine includes the full relevant history', async () 
           id: 'engine',
           provider: 'http://example.test',
           model: 'test-model',
-          contextWindow: 100,
           charsPerToken: 5,
         },
         summary: 'summary',
@@ -196,9 +195,92 @@ test('OpenAIChatCompletionsEngine includes the full relevant history', async () 
     assert.equal(requestBody.messages[13].content, 'User: current message');
     assert.equal(output.metadata.tokenEstimate.strategy, 'chars_per_token');
     assert.equal(output.metadata.tokenEstimate.charsPerToken, 5);
-    assert.equal(output.metadata.tokenEstimate.contextWindow, 100);
+    assert.equal(output.metadata.tokenEstimate.contextWindow, undefined);
     assert.ok(output.metadata.tokenEstimate.promptTokens > 0);
     assert.ok(output.metadata.tokenEstimate.completionTokens > 0);
+    assert.equal(
+      output.metadata.tokenEstimate.promptPack.strategy,
+      'unbounded'
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('OpenAIChatCompletionsEngine packs older history into a summary under budget pressure', async () => {
+  const originalFetch = global.fetch;
+  let requestBody;
+  let output;
+
+  global.fetch = async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      async json() {
+        return {
+          choices: [
+            {
+              message: {
+                content: 'ok',
+              },
+            },
+          ],
+        };
+      },
+    };
+  };
+
+  try {
+    const engine = new OpenAIChatCompletionsEngine(1000);
+    const history = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-${index + 1}`,
+      turnId: `t-${index + 1}`,
+      author: { type: 'agent', id: 'a', name: `Agent ${index + 1}` },
+      visibility: 'public',
+      content:
+        `message-${index + 1} ` +
+        'detail '.repeat(20) +
+        `conclusion-${index + 1}`,
+      timestamp: new Date().toISOString(),
+    }));
+
+    output = await engine.generate({
+      councilId: 'c',
+      turnId: 't',
+      agent: {
+        id: 'a',
+        name: 'Agent A',
+        engine: {
+          id: 'engine',
+          provider: 'http://example.test',
+          model: 'test-model',
+          contextWindow: 220,
+          charsPerToken: 5,
+          responseReserveTokens: 40,
+        },
+        summary: 'summary',
+        systemPrompt: 'system prompt',
+      },
+      mode: 'open',
+      event: createEvent('current message'),
+      history,
+    });
+
+    assert.equal(
+      requestBody.messages.filter((message) => message.role === 'system').length,
+      1
+    );
+    assert.match(requestBody.messages[0].content, /Earlier conversation summary/);
+    assert.equal(requestBody.messages.at(-1).content, 'User: current message');
+    assert.equal(
+      output.metadata.tokenEstimate.promptPack.strategy,
+      'recent_plus_summary'
+    );
+    assert.ok(output.metadata.tokenEstimate.promptPack.rawHistoryMessages > 0);
+    assert.ok(
+      output.metadata.tokenEstimate.promptPack.summarizedHistoryMessages > 0
+    );
+    assert.ok(output.metadata.tokenEstimate.remainingContextTokens >= 0);
   } finally {
     global.fetch = originalFetch;
   }

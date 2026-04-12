@@ -76,7 +76,9 @@ const agents: AgentDefinition[] = [
       id: 'local',
       provider: 'http://localhost:1234',
       model: 'your-model-name',
-      charsPerToken: 4
+      contextWindow: 8192,
+      charsPerToken: 4,
+      responseReserveTokens: 1024
     },
     summary: 'Data analysis expert',
     systemPrompt: 'You are an analytical expert...',
@@ -199,7 +201,9 @@ Engine adapters can request tools by returning `EngineOutput.toolCalls`. The cou
 
 For OpenAI-compatible `/v1/chat/completions` servers, the core package also exports `OpenAIChatCompletionsEngine`.
 
-When `engine.charsPerToken` is configured, `OpenAIChatCompletionsEngine` also attaches approximate prompt/completion token estimates to `EngineOutput.metadata.tokenEstimate`. This is instrumentation only; it does not clip or summarize history.
+When `engine.charsPerToken` is configured, `OpenAIChatCompletionsEngine` also attaches approximate prompt/completion token estimates to `EngineOutput.metadata.tokenEstimate`.
+
+When `engine.contextWindow`, `engine.charsPerToken`, and optionally `engine.responseReserveTokens` are configured, the adapter packs prompts per agent: fixed sections stay raw, older history is summarized before newer raw history is dropped, and the pack trace is exposed under `metadata.tokenEstimate.promptPack`. There is no fixed message-count clipping.
 
 Tools are only executed if the tool name appears in `agent.tools`. You can provide richer tool definitions (name/description/parameters) as `ToolDefinition` entries in `agent.tools`, which are passed to the engine as `EngineInput.tools`.
 
