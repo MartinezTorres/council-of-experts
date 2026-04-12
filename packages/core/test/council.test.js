@@ -159,3 +159,117 @@ test('post surfaces non-stream execution failures in turn errors and records', a
   assert.equal(errorRecords.length, 1);
   assert.equal(errorRecords[0].agentId, 'broken');
 });
+
+test('module and council expose resolved runtime config snapshots', async () => {
+  const module = createCouncilModule({
+    agents: [createAgent('a')],
+    engines: {
+      engine: {
+        async generate() {
+          return { content: 'ok' };
+        },
+      },
+    },
+    runtime: {
+      initialMode: 'council',
+      maxRounds: 5,
+      maxAgentReplies: 1,
+    },
+  });
+
+  assert.deepEqual(module.getConfig(), {
+    runtime: {
+      initialMode: 'council',
+      maxRounds: 5,
+      maxAgentReplies: 1,
+    },
+  });
+
+  const council = await module.openCouncil({
+    councilId: 'configured',
+    metadata: { nested: { ok: true } },
+  });
+
+  const config = council.getConfig();
+  config.metadata.nested.ok = false;
+
+  assert.deepEqual(council.getConfig(), {
+    councilId: 'configured',
+    initialMode: 'council',
+    runtime: {
+      initialMode: 'council',
+      maxRounds: 5,
+      maxAgentReplies: 1,
+    },
+    metadata: { nested: { ok: true } },
+  });
+});
+
+test('runtime.maxAgentReplies becomes the default agent selection limit', async () => {
+  const engine = {
+    async generate(input) {
+      return { content: `reply-${input.agent.id}` };
+    },
+  };
+
+  const module = createCouncilModule({
+    agents: [createAgent('a'), createAgent('b')],
+    engines: { engine },
+    runtime: { maxAgentReplies: 1 },
+  });
+  const council = await module.openCouncil({
+    councilId: 'agent-limit',
+  });
+
+  const defaultResult = await council.post(createEvent('hello'));
+  const overrideResult = await council.post(createEvent('hello again'), {
+    maxAgentReplies: 2,
+  });
+
+  assert.equal(defaultResult.publicMessages.length, 1);
+  assert.equal(defaultResult.publicMessages[0].author.id, 'a');
+  assert.equal(overrideResult.publicMessages.length, 2);
+});
+
+test('runtime.maxRounds becomes the default tool round limit', async () => {
+  const engine = {
+    async generate(input) {
+      if ((input.toolResults?.length ?? 0) >= 2) {
+        return { content: 'done' };
+      }
+
+      return {
+        content: '',
+        toolCalls: [{ name: 'echo', args: { value: input.toolResults?.length ?? 0 } }],
+      };
+    },
+  };
+
+  const module = createCouncilModule({
+    agents: [{ ...createAgent('a'), tools: ['echo'] }],
+    engines: { engine },
+    toolHost: {
+      async execute(call) {
+        return {
+          ok: true,
+          data: call.args,
+        };
+      },
+    },
+    runtime: { maxRounds: 1 },
+  });
+  const council = await module.openCouncil({
+    councilId: 'tool-limit',
+  });
+
+  const limitedResult = await council.post(createEvent('loop once'));
+  const overriddenResult = await council.post(createEvent('loop twice'), {
+    maxRounds: 2,
+  });
+
+  assert.equal(limitedResult.publicMessages.length, 0);
+  assert.equal(limitedResult.errors.length, 1);
+  assert.equal(limitedResult.errors[0].error.code, 'tool_round_limit');
+  assert.equal(overriddenResult.publicMessages.length, 1);
+  assert.equal(overriddenResult.publicMessages[0].content, 'done');
+});

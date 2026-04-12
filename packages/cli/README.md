@@ -89,7 +89,7 @@ The config file uses this shape:
 
 ```json
 {
-  "workspaceRoot": ".",
+  "workspaceRoot": "../..",
   "engines": [
     {
       "id": "local-llm",
@@ -116,6 +116,9 @@ The config file uses this shape:
   "timeout_ms": 60000
 }
 ```
+
+`workspaceRoot` is resolved relative to the config file location, not the
+current shell directory.
 
 ## Architecture
 

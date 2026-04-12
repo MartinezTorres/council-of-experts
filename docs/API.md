@@ -16,7 +16,11 @@ import { createCouncilModule } from 'council-of-experts';
 const councilModule = createCouncilModule({
   agents: agentDefinitions,
   engines: engineImplementations,
-  toolHost: optionalToolHost
+  toolHost: optionalToolHost,
+  runtime: {
+    initialMode: 'open',
+    maxRounds: 3
+  }
 });
 ```
 
@@ -31,6 +35,9 @@ const council = await councilModule.openCouncil({
 
 // Get current mode
 const mode = council.getMode(); // 'open' | 'council' | 'oracle'
+
+// Get resolved config
+const config = council.getConfig();
 
 // Replay persisted records (pure state reconstruction)
 await council.replay(replayEntries);
@@ -47,6 +54,7 @@ for await (const event of council.stream(chatEvent, options)) {
 const messages = await council.getMessages({
   visibility: 'all' // or 'public' or 'private'
 });
+// Returned arrays/messages are detached snapshots.
 
 // Get diagnostic snapshot (unstable)
 const status = await council.getStatus();
@@ -202,7 +210,7 @@ interface TurnError {
 - The council executes them via `ToolHost` and emits `tool.called` / `tool.result` records and runtime events.
 - The engine is called again with `EngineInput.toolCalls` + `EngineInput.toolResults` for the current turn.
 - Tool calls are executed only if the tool name is present in `agent.tools`.
-- `TurnOptions.maxRounds` limits tool-call round trips per agent (default 3).
+- `TurnOptions.maxRounds` limits tool-call round trips per agent. The module-level default comes from `createCouncilModule({ runtime: { maxRounds } })`, and defaults to `3`.
 - Non-stream execution failures are surfaced in `TurnResult.errors` and durable `error` records.
 
 ## Operating Modes
@@ -251,6 +259,9 @@ await council.replay([
 const messages = await council.getMessages();
 ```
 
+Replay order matters: the reconstructed message order follows the original
+`message.emitted` record order.
+
 ## Durability Pattern
 
 ```typescript
@@ -267,6 +278,9 @@ for (const record of result.records) {
 
 // 4. If persistence fails, discard council and replay from durable log
 ```
+
+Hosts should also inspect `result.errors` if they need to surface non-stream
+turn failures without parsing the durable records.
 
 ## Runtime Events (Streaming)
 

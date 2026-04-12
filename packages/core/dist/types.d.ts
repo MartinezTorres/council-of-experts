@@ -123,6 +123,21 @@ export interface CouncilModuleConfig {
     agents: AgentDefinition[];
     engines: Record<string, EngineAdapter>;
     toolHost?: ToolHost;
+    runtime?: Partial<CouncilRuntimeConfig>;
+}
+export interface CouncilRuntimeConfig {
+    initialMode: CouncilMode;
+    maxRounds: number;
+    maxAgentReplies?: number;
+}
+export interface CouncilModuleResolvedConfig {
+    runtime: CouncilRuntimeConfig;
+}
+export interface CouncilInstanceResolvedConfig {
+    councilId: string;
+    initialMode: CouncilMode;
+    runtime: CouncilRuntimeConfig;
+    metadata?: Record<string, unknown>;
 }
 export interface TurnOptions {
     mode?: CouncilMode;
@@ -258,6 +273,7 @@ export type CouncilRuntimeEvent = {
 };
 export interface Council {
     getMode(): CouncilMode;
+    getConfig(): CouncilInstanceResolvedConfig;
     replay(entries: Iterable<CouncilReplayEntry> | AsyncIterable<CouncilReplayEntry>): Promise<void>;
     post(event: ChatEvent, options?: TurnOptions): Promise<TurnResult>;
     stream(event: ChatEvent, options?: TurnOptions): AsyncIterable<CouncilRuntimeEvent>;
@@ -271,5 +287,6 @@ export interface Council {
 export interface CouncilModule {
     openCouncil(input: OpenCouncilInput): Promise<Council>;
     listAgents(): AgentDefinition[];
+    getConfig(): CouncilModuleResolvedConfig;
 }
 //# sourceMappingURL=types.d.ts.map

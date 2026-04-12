@@ -1,5 +1,6 @@
 import {
   Council,
+  CouncilInstanceResolvedConfig,
   CouncilMode,
   CouncilMessage,
   CouncilRecord,
@@ -19,11 +20,24 @@ import {
   CouncilError,
   TurnError,
   COUNCIL_CONTRACT_VERSION,
+  CouncilRuntimeConfig,
 } from './types.js';
+import { createCouncilConfigSnapshot } from './config.js';
 import { generateId } from './utils.js';
+import { executeOpenWorkflow, streamOpenWorkflow } from './workflows/open.js';
+import {
+  executeCouncilWorkflow,
+  streamCouncilWorkflow,
+} from './workflows/council.js';
+import {
+  executeOracleWorkflow,
+  streamOracleWorkflow,
+} from './workflows/oracle.js';
+import type { WorkflowDependencies } from './workflows/shared.js';
 
 interface CouncilState {
   councilId: string;
+  initialMode: CouncilMode;
   mode: CouncilMode;
   messages: CouncilMessage[];
   metadata?: Record<string, unknown>;
@@ -32,6 +46,7 @@ interface CouncilState {
 
 export class CouncilImpl implements Council {
   private state: CouncilState;
+  private runtimeConfig: CouncilRuntimeConfig;
   private agents: Map<string, AgentDefinition>;
   private engines: Map<string, EngineAdapter>;
   private toolHost?: ToolHost;
@@ -39,6 +54,7 @@ export class CouncilImpl implements Council {
   constructor(
     councilId: string,
     initialMode: CouncilMode,
+    runtimeConfig: CouncilRuntimeConfig,
     agents: AgentDefinition[],
     engines: Record<string, EngineAdapter>,
     toolHost?: ToolHost,
@@ -46,12 +62,18 @@ export class CouncilImpl implements Council {
   ) {
     this.state = {
       councilId,
+      initialMode,
       mode: initialMode,
       messages: [],
       metadata,
       disposed: false,
     };
 
+    this.runtimeConfig = {
+      initialMode: runtimeConfig.initialMode,
+      maxRounds: runtimeConfig.maxRounds,
+      maxAgentReplies: runtimeConfig.maxAgentReplies,
+    };
     this.agents = new Map(agents.map((a) => [a.id, a]));
     this.engines = new Map(Object.entries(engines));
     this.toolHost = toolHost;
@@ -59,6 +81,15 @@ export class CouncilImpl implements Council {
 
   getMode(): CouncilMode {
     return this.state.mode;
+  }
+
+  getConfig(): CouncilInstanceResolvedConfig {
+    return createCouncilConfigSnapshot({
+      councilId: this.state.councilId,
+      initialMode: this.state.initialMode,
+      runtime: this.runtimeConfig,
+      metadata: this.state.metadata,
+    });
   }
 
   async replay(
@@ -104,6 +135,8 @@ export class CouncilImpl implements Council {
 
     const turnId = generateId();
     const mode = options?.mode ?? this.state.mode;
+    const activeAgents = this.selectAgents(options);
+    const workflowDeps = this.createWorkflowDependencies();
     const records: CouncilRecord[] = [];
     const publicMessages: CouncilMessage[] = [];
     const privateMessages: CouncilMessage[] = [];
@@ -127,38 +160,56 @@ export class CouncilImpl implements Council {
     // Execute turn based on mode
     switch (mode) {
       case 'open':
-        await this.executeOpenMode(
-          turnId,
-          event,
-          options,
-          publicMessages,
-          privateMessages,
-          records,
-          errors
+        await executeOpenWorkflow(
+          {
+            councilId: this.state.councilId,
+            turnId,
+            event,
+            options,
+            activeAgents,
+            stateMessages: this.state.messages,
+            publicMessages,
+            privateMessages,
+            records,
+            errors,
+          },
+          workflowDeps
         );
         break;
 
       case 'council':
-        await this.executeCouncilMode(
-          turnId,
-          event,
-          options,
-          publicMessages,
-          privateMessages,
-          records,
-          errors
+        await executeCouncilWorkflow(
+          {
+            councilId: this.state.councilId,
+            turnId,
+            event,
+            options,
+            activeAgents,
+            stateMessages: this.state.messages,
+            publicMessages,
+            privateMessages,
+            records,
+            errors,
+          },
+          workflowDeps
         );
         break;
 
       case 'oracle':
-        await this.executeOracleMode(
-          turnId,
-          event,
-          options,
-          publicMessages,
-          privateMessages,
-          records,
-          errors
+        await executeOracleWorkflow(
+          {
+            councilId: this.state.councilId,
+            turnId,
+            event,
+            options,
+            activeAgents,
+            stateMessages: this.state.messages,
+            publicMessages,
+            privateMessages,
+            records,
+            errors,
+          },
+          workflowDeps
         );
         break;
     }
@@ -197,6 +248,8 @@ export class CouncilImpl implements Council {
 
     const turnId = generateId();
     const mode = options?.mode ?? this.state.mode;
+    const activeAgents = this.selectAgents(options);
+    const workflowDeps = this.createWorkflowDependencies();
 
     // Buffer for messages emitted this turn - committed to state after turn completes
     const pendingMessages: CouncilMessage[] = [];
@@ -226,15 +279,48 @@ export class CouncilImpl implements Council {
     // Stream turn execution based on mode
     switch (mode) {
       case 'open':
-        yield* this.streamOpenMode(turnId, event, options, pendingMessages);
+        yield* streamOpenWorkflow(
+          {
+            councilId: this.state.councilId,
+            turnId,
+            event,
+            options,
+            activeAgents,
+            stateMessages: this.state.messages,
+            pendingMessages,
+          },
+          workflowDeps
+        );
         break;
 
       case 'council':
-        yield* this.streamCouncilMode(turnId, event, options, pendingMessages);
+        yield* streamCouncilWorkflow(
+          {
+            councilId: this.state.councilId,
+            turnId,
+            event,
+            options,
+            activeAgents,
+            stateMessages: this.state.messages,
+            pendingMessages,
+          },
+          workflowDeps
+        );
         break;
 
       case 'oracle':
-        yield* this.streamOracleMode(turnId, event, options, pendingMessages);
+        yield* streamOracleWorkflow(
+          {
+            councilId: this.state.councilId,
+            turnId,
+            event,
+            options,
+            activeAgents,
+            stateMessages: this.state.messages,
+            pendingMessages,
+          },
+          workflowDeps
+        );
         break;
     }
 
@@ -295,6 +381,7 @@ export class CouncilImpl implements Council {
         name: a.name,
         engine: a.engine.id,
       })),
+      config: this.getConfig(),
       metadata:
         this.state.metadata === undefined
           ? undefined
@@ -313,6 +400,49 @@ export class CouncilImpl implements Council {
     if (this.state.disposed) {
       throw new Error('Council has been disposed');
     }
+  }
+
+  private createWorkflowDependencies(): WorkflowDependencies {
+    return {
+      generateWithTools: (
+        turnId,
+        agent,
+        mode,
+        event,
+        history,
+        options,
+        records,
+        errors
+      ) =>
+        this.generateWithTools(
+          turnId,
+          agent,
+          mode,
+          event,
+          history,
+          options,
+          records,
+          errors
+        ),
+      generateWithToolsStream: (
+        turnId,
+        agent,
+        mode,
+        event,
+        history,
+        options
+      ) =>
+        this.generateWithToolsStream(
+          turnId,
+          agent,
+          mode,
+          event,
+          history,
+          options
+        ),
+      recordTurnError: (turnId, records, errors, error, agentId) =>
+        this.recordTurnError(turnId, records, errors, error, agentId),
+    };
   }
 
   // Tooling helpers
@@ -560,7 +690,10 @@ export class CouncilImpl implements Council {
     const toolDefinitions = this.getToolDefinitions(agent);
     const allowedToolNames = new Set(toolDefinitions.map((tool) => tool.name));
 
-    const maxToolRounds = Math.max(0, options?.maxRounds ?? 3);
+    const maxToolRounds = Math.max(
+      0,
+      options?.maxRounds ?? this.runtimeConfig.maxRounds
+    );
     let toolRounds = 0;
 
     const toolCallsHistory: ToolCall[] = [];
@@ -643,7 +776,10 @@ export class CouncilImpl implements Council {
     const toolDefinitions = this.getToolDefinitions(agent);
     const allowedToolNames = new Set(toolDefinitions.map((tool) => tool.name));
 
-    const maxToolRounds = Math.max(0, options?.maxRounds ?? 3);
+    const maxToolRounds = Math.max(
+      0,
+      options?.maxRounds ?? this.runtimeConfig.maxRounds
+    );
     let toolRounds = 0;
 
     const toolCallsHistory: ToolCall[] = [];
@@ -787,771 +923,13 @@ export class CouncilImpl implements Council {
     }
   }
 
-  // Mode-specific execution methods
-
-  private async executeOpenMode(
-    turnId: string,
-    event: ChatEvent,
-    options: TurnOptions | undefined,
-    publicMessages: CouncilMessage[],
-    privateMessages: CouncilMessage[],
-    records: CouncilRecord[],
-    errors: TurnError[]
-  ): Promise<void> {
-    // In open mode, agents may speak independently in public
-    // Simple parallel execution - each agent that wants to respond does so publicly
-
-    const activeAgents = this.selectAgents(event, options);
-
-    await Promise.allSettled(
-      activeAgents.map(async (agent) => {
-        try {
-          const history = this.state.messages.filter(
-            (m) => m.visibility === 'public'
-          );
-          const output = await this.generateWithTools(
-            turnId,
-            agent,
-            'open',
-            event,
-            history,
-            options,
-            records,
-            errors
-          );
-
-          if (output && output.content.trim()) {
-            const message: CouncilMessage = {
-              id: generateId(),
-              turnId,
-              author: {
-                type: 'agent',
-                id: agent.id,
-                name: agent.name,
-              },
-              visibility: 'public',
-              content: output.content,
-              timestamp: new Date().toISOString(),
-              metadata: output.metadata,
-            };
-
-            publicMessages.push(message);
-
-            const record: CouncilRecord = {
-              contractVersion: COUNCIL_CONTRACT_VERSION,
-              type: 'message.emitted',
-              councilId: this.state.councilId,
-              turnId,
-              timestamp: message.timestamp,
-              message,
-            };
-            records.push(record);
-          }
-        } catch (error) {
-          this.recordTurnError(
-            turnId,
-            records,
-            errors,
-            {
-              code: 'agent_execution_failed',
-              message: `Agent ${agent.id} failed in open mode: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            },
-            agent.id
-          );
-        }
-      })
-    );
-  }
-
-  private async executeCouncilMode(
-    turnId: string,
-    event: ChatEvent,
-    options: TurnOptions | undefined,
-    publicMessages: CouncilMessage[],
-    privateMessages: CouncilMessage[],
-    records: CouncilRecord[],
-    errors: TurnError[]
-  ): Promise<void> {
-    // In council mode, agents deliberate privately then may emit public messages
-    // Phase 1: Private deliberation
-    // Phase 2: Public synthesis
-
-    const activeAgents = this.selectAgents(event, options);
-
-    // Phase 1: Private deliberation round
-    const privateThoughts: Array<{ agent: AgentDefinition; content: string }> =
-      [];
-
-    await Promise.allSettled(
-      activeAgents.map(async (agent) => {
-        try {
-          const output = await this.generateWithTools(
-            turnId,
-            agent,
-            'council',
-            event,
-            this.state.messages,
-            options,
-            records,
-            errors
-          );
-
-          if (output && output.content.trim()) {
-            privateThoughts.push({ agent, content: output.content });
-
-            const message: CouncilMessage = {
-              id: generateId(),
-              turnId,
-              author: {
-                type: 'agent',
-                id: agent.id,
-                name: agent.name,
-              },
-              visibility: 'private',
-              content: output.content,
-              timestamp: new Date().toISOString(),
-              metadata: output.metadata,
-            };
-
-            privateMessages.push(message);
-
-            const record: CouncilRecord = {
-              contractVersion: COUNCIL_CONTRACT_VERSION,
-              type: 'message.emitted',
-              councilId: this.state.councilId,
-              turnId,
-              timestamp: message.timestamp,
-              message,
-            };
-            records.push(record);
-          }
-        } catch (error) {
-          this.recordTurnError(
-            turnId,
-            records,
-            errors,
-            {
-              code: 'agent_execution_failed',
-              message: `Agent ${agent.id} failed in council deliberation: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            },
-            agent.id
-          );
-        }
-      })
-    );
-
-    // Phase 2: Public synthesis
-    // Each agent can now emit a public response based on the private deliberation
-    // For simplicity, we'll let each agent optionally emit one public message
-
-    if (privateThoughts.length > 0) {
-      await Promise.allSettled(
-        activeAgents.map(async (agent) => {
-          try {
-            // Create a synthesis prompt showing all private thoughts
-            const synthesisPrompt = `Based on the council's private deliberation, formulate your public response.
-
-Private thoughts from council:
-${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
-
-Your public response (or say nothing if you have nothing to add):`;
-
-            const synthesisEvent: ChatEvent = {
-              ...event,
-              content: synthesisPrompt,
-            };
-
-            const output = await this.generateWithTools(
-              turnId,
-              agent,
-              'council',
-              synthesisEvent,
-              [...this.state.messages, ...privateMessages],
-              options,
-              records,
-              errors
-            );
-
-            if (output && output.content.trim()) {
-              const message: CouncilMessage = {
-                id: generateId(),
-                turnId,
-                author: {
-                  type: 'agent',
-                  id: agent.id,
-                  name: agent.name,
-                },
-                visibility: 'public',
-                content: output.content,
-                timestamp: new Date().toISOString(),
-                metadata: output.metadata,
-              };
-
-              publicMessages.push(message);
-
-              const record: CouncilRecord = {
-                contractVersion: COUNCIL_CONTRACT_VERSION,
-                type: 'message.emitted',
-                councilId: this.state.councilId,
-                turnId,
-                timestamp: message.timestamp,
-                message,
-              };
-              records.push(record);
-            }
-          } catch (error) {
-            this.recordTurnError(
-              turnId,
-              records,
-              errors,
-              {
-                code: 'agent_execution_failed',
-                message: `Agent ${agent.id} failed in council synthesis: ${
-                  error instanceof Error ? error.message : String(error)
-                }`,
-              },
-              agent.id
-            );
-          }
-        })
-      );
-    }
-  }
-
-  private async executeOracleMode(
-    turnId: string,
-    event: ChatEvent,
-    options: TurnOptions | undefined,
-    publicMessages: CouncilMessage[],
-    privateMessages: CouncilMessage[],
-    records: CouncilRecord[],
-    errors: TurnError[]
-  ): Promise<void> {
-    // In oracle mode, agents deliberate privately but the public response is unified
-    // Phase 1: Private deliberation
-    // Phase 2: Unified oracle response
-
-    const activeAgents = this.selectAgents(event, options);
-
-    // Phase 1: Private deliberation
-    const privateThoughts: Array<{ agent: AgentDefinition; content: string }> =
-      [];
-
-    await Promise.allSettled(
-      activeAgents.map(async (agent) => {
-        try {
-          const output = await this.generateWithTools(
-            turnId,
-            agent,
-            'oracle',
-            event,
-            this.state.messages,
-            options,
-            records,
-            errors
-          );
-
-          if (output && output.content.trim()) {
-            privateThoughts.push({ agent, content: output.content });
-
-            const message: CouncilMessage = {
-              id: generateId(),
-              turnId,
-              author: {
-                type: 'agent',
-                id: agent.id,
-                name: agent.name,
-              },
-              visibility: 'private',
-              content: output.content,
-              timestamp: new Date().toISOString(),
-              metadata: output.metadata,
-            };
-
-            privateMessages.push(message);
-
-            const record: CouncilRecord = {
-              contractVersion: COUNCIL_CONTRACT_VERSION,
-              type: 'message.emitted',
-              councilId: this.state.councilId,
-              turnId,
-              timestamp: message.timestamp,
-              message,
-            };
-            records.push(record);
-          }
-        } catch (error) {
-          this.recordTurnError(
-            turnId,
-            records,
-            errors,
-            {
-              code: 'agent_execution_failed',
-              message: `Agent ${agent.id} failed in oracle deliberation: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            },
-            agent.id
-          );
-        }
-      })
-    );
-
-    // Phase 2: Unified oracle response
-    // Use the first available agent to synthesize a unified response
-    if (privateThoughts.length > 0 && activeAgents.length > 0) {
-      const synthesisAgent = activeAgents[0];
-      try {
-        const oraclePrompt = `You are the Oracle, speaking with one unified voice for the council.
-
-Private deliberation from council members:
-${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
-
-Synthesize a single, unified response that represents the council's collective wisdom:`;
-
-        const oracleEvent: ChatEvent = {
-          ...event,
-          content: oraclePrompt,
-        };
-
-        const output = await this.generateWithTools(
-          turnId,
-          synthesisAgent,
-          'oracle',
-          oracleEvent,
-          [...this.state.messages, ...privateMessages],
-          options,
-          records,
-          errors
-        );
-
-        if (output && output.content.trim()) {
-          const message: CouncilMessage = {
-            id: generateId(),
-            turnId,
-            author: {
-              type: 'oracle',
-              id: 'oracle',
-              name: 'Oracle',
-            },
-            visibility: 'public',
-            content: output.content,
-            timestamp: new Date().toISOString(),
-            metadata: output.metadata,
-          };
-
-          publicMessages.push(message);
-
-          const record: CouncilRecord = {
-            contractVersion: COUNCIL_CONTRACT_VERSION,
-            type: 'message.emitted',
-            councilId: this.state.councilId,
-            turnId,
-            timestamp: message.timestamp,
-            message,
-          };
-          records.push(record);
-        }
-      } catch (error) {
-        this.recordTurnError(
-          turnId,
-          records,
-          errors,
-          {
-            code: 'oracle_synthesis_failed',
-            message: `Oracle synthesis failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          },
-          synthesisAgent.id
-        );
-      }
-    }
-  }
-
-  // Streaming variants
-
-  private async *streamOpenMode(
-    turnId: string,
-    event: ChatEvent,
-    options: TurnOptions | undefined,
-    pendingMessages: CouncilMessage[]
-  ): AsyncGenerator<CouncilRuntimeEvent, void, void> {
-    const activeAgents = this.selectAgents(event, options);
-
-    for (const agent of activeAgents) {
-      yield {
-        type: 'agent.started',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: agent.id,
-        timestamp: new Date().toISOString(),
-      };
-
-      try {
-        const history = this.state.messages.filter(
-          (m) => m.visibility === 'public'
-        );
-        const output = yield* this.generateWithToolsStream(
-          turnId,
-          agent,
-          'open',
-          event,
-          history,
-          options
-        );
-
-        if (output && output.content.trim()) {
-          const message: CouncilMessage = {
-            id: generateId(),
-            turnId,
-            author: { type: 'agent', id: agent.id, name: agent.name },
-            visibility: 'public',
-            content: output.content,
-            timestamp: new Date().toISOString(),
-            metadata: output.metadata,
-          };
-
-          pendingMessages.push(message);
-
-          yield {
-            type: 'message.emitted',
-            councilId: this.state.councilId,
-            turnId,
-            timestamp: message.timestamp,
-            message,
-          };
-        }
-      } catch (error) {
-        yield {
-          type: 'error',
-          councilId: this.state.councilId,
-          turnId,
-          agentId: agent.id,
-          timestamp: new Date().toISOString(),
-          error: {
-            code: 'agent_execution_failed',
-            message: error instanceof Error ? error.message : String(error),
-          },
-        };
-      }
-
-      yield {
-        type: 'agent.finished',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: agent.id,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
-  private async *streamCouncilMode(
-    turnId: string,
-    event: ChatEvent,
-    options: TurnOptions | undefined,
-    pendingMessages: CouncilMessage[]
-  ): AsyncGenerator<CouncilRuntimeEvent, void, void> {
-    const activeAgents = this.selectAgents(event, options);
-    const privateThoughts: Array<{ agent: AgentDefinition; content: string }> = [];
-
-    // Phase 1: Private deliberation
-    for (const agent of activeAgents) {
-      yield {
-        type: 'agent.started',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: agent.id,
-        timestamp: new Date().toISOString(),
-      };
-
-      try {
-        const output = yield* this.generateWithToolsStream(
-          turnId,
-          agent,
-          'council',
-          event,
-          [...this.state.messages, ...pendingMessages],
-          options
-        );
-
-        if (output && output.content.trim()) {
-          privateThoughts.push({ agent, content: output.content });
-
-          const message: CouncilMessage = {
-            id: generateId(),
-            turnId,
-            author: { type: 'agent', id: agent.id, name: agent.name },
-            visibility: 'private',
-            content: output.content,
-            timestamp: new Date().toISOString(),
-            metadata: output.metadata,
-          };
-
-          pendingMessages.push(message);
-
-          yield {
-            type: 'message.emitted',
-            councilId: this.state.councilId,
-            turnId,
-            timestamp: message.timestamp,
-            message,
-          };
-        }
-      } catch (error) {
-        yield {
-          type: 'error',
-          councilId: this.state.councilId,
-          turnId,
-          agentId: agent.id,
-          timestamp: new Date().toISOString(),
-          error: { message: error instanceof Error ? error.message : String(error) },
-        };
-      }
-
-      yield {
-        type: 'agent.finished',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: agent.id,
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    // Phase 2: Public synthesis
-    if (privateThoughts.length > 0) {
-      for (const agent of activeAgents) {
-        yield {
-          type: 'agent.started',
-          councilId: this.state.councilId,
-          turnId,
-          agentId: agent.id,
-          timestamp: new Date().toISOString(),
-        };
-
-        try {
-          const synthesisPrompt = `Based on the council's private deliberation, formulate your public response.
-
-Private thoughts from council:
-${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
-
-Your public response (or say nothing if you have nothing to add):`;
-
-          const output = yield* this.generateWithToolsStream(
-            turnId,
-            agent,
-            'council',
-            { ...event, content: synthesisPrompt },
-            [...this.state.messages, ...pendingMessages],
-            options
-          );
-
-          if (output && output.content.trim()) {
-            const message: CouncilMessage = {
-              id: generateId(),
-              turnId,
-              author: { type: 'agent', id: agent.id, name: agent.name },
-              visibility: 'public',
-              content: output.content,
-              timestamp: new Date().toISOString(),
-              metadata: output.metadata,
-            };
-
-            pendingMessages.push(message);
-
-            yield {
-              type: 'message.emitted',
-              councilId: this.state.councilId,
-              turnId,
-              timestamp: message.timestamp,
-              message,
-            };
-          }
-        } catch (error) {
-          yield {
-            type: 'error',
-            councilId: this.state.councilId,
-            turnId,
-            agentId: agent.id,
-            timestamp: new Date().toISOString(),
-            error: {
-              code: 'agent_execution_failed',
-              message: error instanceof Error ? error.message : String(error),
-            },
-          };
-        }
-
-        yield {
-          type: 'agent.finished',
-          councilId: this.state.councilId,
-          turnId,
-          agentId: agent.id,
-          timestamp: new Date().toISOString(),
-        };
-      }
-    }
-  }
-
-  private async *streamOracleMode(
-    turnId: string,
-    event: ChatEvent,
-    options: TurnOptions | undefined,
-    pendingMessages: CouncilMessage[]
-  ): AsyncGenerator<CouncilRuntimeEvent, void, void> {
-    const activeAgents = this.selectAgents(event, options);
-    const privateThoughts: Array<{ agent: AgentDefinition; content: string }> = [];
-
-    // Phase 1: Private deliberation
-    for (const agent of activeAgents) {
-      yield {
-        type: 'agent.started',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: agent.id,
-        timestamp: new Date().toISOString(),
-      };
-
-      try {
-        const output = yield* this.generateWithToolsStream(
-          turnId,
-          agent,
-          'oracle',
-          event,
-          [...this.state.messages, ...pendingMessages],
-          options
-        );
-
-        if (output && output.content.trim()) {
-          privateThoughts.push({ agent, content: output.content });
-
-          const message: CouncilMessage = {
-            id: generateId(),
-            turnId,
-            author: { type: 'agent', id: agent.id, name: agent.name },
-            visibility: 'private',
-            content: output.content,
-            timestamp: new Date().toISOString(),
-            metadata: output.metadata,
-          };
-
-          pendingMessages.push(message);
-
-          yield {
-            type: 'message.emitted',
-            councilId: this.state.councilId,
-            turnId,
-            timestamp: message.timestamp,
-            message,
-          };
-        }
-      } catch (error) {
-        yield {
-          type: 'error',
-          councilId: this.state.councilId,
-          turnId,
-          agentId: agent.id,
-          timestamp: new Date().toISOString(),
-          error: {
-            code: 'agent_execution_failed',
-            message: error instanceof Error ? error.message : String(error),
-          },
-        };
-      }
-
-      yield {
-        type: 'agent.finished',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: agent.id,
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    // Phase 2: Oracle synthesis
-    if (privateThoughts.length > 0 && activeAgents.length > 0) {
-      const synthesisAgent = activeAgents[0];
-
-      yield {
-        type: 'agent.started',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: 'oracle',
-        timestamp: new Date().toISOString(),
-      };
-
-      try {
-        const oraclePrompt = `You are the Oracle, speaking with one unified voice for the council.
-
-Private deliberation from council members:
-${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
-
-Synthesize a single, unified response that represents the council's collective wisdom:`;
-
-        const output = yield* this.generateWithToolsStream(
-          turnId,
-          synthesisAgent,
-          'oracle',
-          { ...event, content: oraclePrompt },
-          [...this.state.messages, ...pendingMessages],
-          options
-        );
-
-        if (output && output.content.trim()) {
-          const message: CouncilMessage = {
-            id: generateId(),
-            turnId,
-            author: { type: 'oracle', id: 'oracle', name: 'Oracle' },
-            visibility: 'public',
-            content: output.content,
-            timestamp: new Date().toISOString(),
-            metadata: output.metadata,
-          };
-
-          pendingMessages.push(message);
-
-          yield {
-            type: 'message.emitted',
-            councilId: this.state.councilId,
-            turnId,
-            timestamp: message.timestamp,
-            message,
-          };
-        }
-      } catch (error) {
-        yield {
-          type: 'error',
-          councilId: this.state.councilId,
-          turnId,
-          agentId: 'oracle',
-          timestamp: new Date().toISOString(),
-          error: {
-            code: 'oracle_synthesis_failed',
-            message: error instanceof Error ? error.message : String(error),
-          },
-        };
-      }
-
-      yield {
-        type: 'agent.finished',
-        councilId: this.state.councilId,
-        turnId,
-        agentId: 'oracle',
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
-  private selectAgents(
-    event: ChatEvent,
-    options: TurnOptions | undefined
-  ): AgentDefinition[] {
+  private selectAgents(options: TurnOptions | undefined): AgentDefinition[] {
     // Simple agent selection: all agents participate
     // Future: implement relevance checking, @mentions, etc.
-    const maxAgents = options?.maxAgentReplies ?? this.agents.size;
+    const maxAgents =
+      options?.maxAgentReplies ??
+      this.runtimeConfig.maxAgentReplies ??
+      this.agents.size;
     return Array.from(this.agents.values()).slice(0, maxAgents);
   }
 }

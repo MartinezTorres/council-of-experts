@@ -90,6 +90,7 @@ Important rules:
 - replay must not call tools
 - replay must not touch persistence
 - replay order must match the original append order from the host log
+- reconstructed message order must match the original `message.emitted` record order
 
 If the host wants private council messages, mode transitions, tool activity, and other council activity to survive reboot, it must persist the corresponding `CouncilRecord` values returned by the module.
 
@@ -262,6 +263,24 @@ export interface CouncilModuleConfig {
   agents: AgentDefinition[];
   engines: Record<string, EngineAdapter>;
   toolHost?: ToolHost;
+  runtime?: Partial<CouncilRuntimeConfig>;
+}
+
+export interface CouncilRuntimeConfig {
+  initialMode: CouncilMode;
+  maxRounds: number;
+  maxAgentReplies?: number;
+}
+
+export interface CouncilModuleResolvedConfig {
+  runtime: CouncilRuntimeConfig;
+}
+
+export interface CouncilInstanceResolvedConfig {
+  councilId: string;
+  initialMode: CouncilMode;
+  runtime: CouncilRuntimeConfig;
+  metadata?: Record<string, unknown>;
 }
 
 export interface TurnOptions {
@@ -421,6 +440,8 @@ export type CouncilRuntimeEvent =
 export interface Council {
   getMode(): CouncilMode;
 
+  getConfig(): CouncilInstanceResolvedConfig;
+
   replay(
     entries: Iterable<CouncilReplayEntry> | AsyncIterable<CouncilReplayEntry>
   ): Promise<void>;
@@ -445,6 +466,7 @@ export interface Council {
 export interface CouncilModule {
   openCouncil(input: OpenCouncilInput): Promise<Council>;
   listAgents(): AgentDefinition[];
+  getConfig(): CouncilModuleResolvedConfig;
 }
 
 export declare function createCouncilModule(
@@ -459,6 +481,8 @@ export declare function createCouncilModule(
 `openCouncil(...)` creates an in-memory council instance.
 
 It must not load files, read databases, or perform any durable storage access. It does not imply that the council is new in the durable sense. The host decides whether a council is new or recovered.
+
+If `OpenCouncilInput.initialMode` is omitted, the module runtime default is used.
 
 ### 8.2 `replay(...)`
 
@@ -486,6 +510,7 @@ The council may:
 - change mode
 - request tools through the configured `ToolHost`
 - emit replayable `CouncilRecord[]`
+- surface non-stream execution failures in `TurnResult.errors`
 
 The host persists the returned records.
 
@@ -501,6 +526,9 @@ It exposes runtime events while a turn is running. It is intended for developer 
 
 `getMessages(...)` returns the council message history currently held in memory.
 
+The returned array and message objects are detached snapshots. Mutating them must
+not mutate the internal council state.
+
 The `visibility` filter exists so the host can inspect:
 
 - only public messages
@@ -508,6 +536,14 @@ The `visibility` filter exists so the host can inspect:
 - all messages
 
 If the host wants private messages to survive reboot, it must persist the `message.emitted` records corresponding to those messages.
+
+### 8.5a `getConfig()`
+
+`getConfig()` returns a stable snapshot of the resolved runtime configuration.
+
+For `CouncilModule`, it exposes module-level defaults such as `initialMode`, `maxRounds`, and `maxAgentReplies`.
+
+For `Council`, it exposes the council id, the effective initial mode used when the council was opened, and the same resolved runtime defaults.
 
 ### 8.6 `getStatus()`
 
@@ -590,7 +626,7 @@ Every tool call that is intended to survive reboot should be represented in the 
 - The council executes those calls through `ToolHost`, emitting `tool.called` / `tool.result` records (and runtime events).
 - The council then calls the engine again with `EngineInput.toolCalls` + `EngineInput.toolResults` populated for the current turn.
 - Tool calls are only executed if the tool name appears in `agent.tools`. Otherwise a failed `ToolResult` is returned.
-- `TurnOptions.maxRounds` limits tool-call round trips per agent (default is 3).
+- `TurnOptions.maxRounds` limits tool-call round trips per agent. If omitted, the module runtime default is used; the built-in default is `3`.
 
 Tool definitions (name/description/parameters) can be provided in `agent.tools` as `ToolDefinition` entries. The council passes the normalized definitions to the engine in `EngineInput.tools`.
 
@@ -627,7 +663,8 @@ For a host using a single append-only text log per idea, the recommended pattern
 2. call `council.post(chatEvent)`
 3. append `TurnResult.records` to the host log
 4. publish any public messages to the application UI
-5. optionally expose private messages and `getStatus()` in diagnostics tooling
+5. inspect `TurnResult.errors` if the host wants to surface non-stream failures
+6. optionally expose private messages and `getStatus()` in diagnostics tooling
 
 ### 12.3 On persistence failure after `post(...)`
 
@@ -669,6 +706,10 @@ await appendCouncilRecordsToIdeaLog(ideaId, result.records);
 
 for (const msg of result.publicMessages) {
   publishToUi(msg);
+}
+
+for (const entry of result.errors) {
+  reportTurnError(entry);
 }
 
 const debugStatus = await council.getStatus();

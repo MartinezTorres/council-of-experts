@@ -22,6 +22,9 @@ export type {
   EngineOutput,
   EngineAdapter,
   CouncilModuleConfig,
+  CouncilRuntimeConfig,
+  CouncilModuleResolvedConfig,
+  CouncilInstanceResolvedConfig,
   TurnOptions,
   CouncilRecord,
   CouncilReplayEntry,
@@ -37,6 +40,7 @@ export type {
 
 // Export constant
 export { COUNCIL_CONTRACT_VERSION } from './types.js';
+export { DEFAULT_COUNCIL_RUNTIME_CONFIG } from './config.js';
 
 // Export factory function
 export { createCouncilModule } from './CouncilModule.js';

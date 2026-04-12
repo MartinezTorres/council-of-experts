@@ -4,6 +4,7 @@
  */
 // Export constant
 export { COUNCIL_CONTRACT_VERSION } from './types.js';
+export { DEFAULT_COUNCIL_RUNTIME_CONFIG } from './config.js';
 // Export factory function
 export { createCouncilModule } from './CouncilModule.js';
 // Export utility functions

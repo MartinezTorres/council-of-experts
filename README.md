@@ -88,8 +88,8 @@ class ChatCompletionsEngine implements EngineAdapter {
 // 3. Implement ToolHost (optional)
 const toolHost: ToolHost = {
   async execute(call, ctx) {
-    if (call.name === 'read_document') {
-      const doc = await yourDocStore.get(ctx.councilId);
+    if (call.name === 'lookup_context') {
+      const doc = await yourContextStore.get(ctx.councilId);
       return { ok: true, content: doc };
     }
     return { ok: false, error: 'Unknown tool' };
@@ -100,7 +100,11 @@ const toolHost: ToolHost = {
 const councilModule = createCouncilModule({
   agents,
   engines: { 'local': new ChatCompletionsEngine() },
-  toolHost
+  toolHost,
+  runtime: {
+    initialMode: 'open',
+    maxRounds: 3
+  }
 });
 
 // 5. Open council and post events
@@ -189,7 +193,9 @@ Engine adapters can request tools by returning `EngineOutput.toolCalls`. The cou
 
 Tools are only executed if the tool name appears in `agent.tools`. You can provide richer tool definitions (name/description/parameters) as `ToolDefinition` entries in `agent.tools`, which are passed to the engine as `EngineInput.tools`.
 
-`TurnOptions.maxRounds` limits tool-call round trips per agent (default 3).
+`TurnOptions.maxRounds` limits tool-call round trips per agent. The module-level default comes from `createCouncilModule({ runtime: { maxRounds } })`, and defaults to `3`.
+
+Non-stream execution failures are surfaced through `TurnResult.errors` and durable `error` records.
 
 ## Inspecting Private Channel
 
@@ -199,6 +205,11 @@ const allMessages = await council.getMessages({ visibility: 'all' });
 
 // Get only private deliberation
 const privateMessages = await council.getMessages({ visibility: 'private' });
+
+// Returned arrays/messages are detached snapshots.
+
+// Get resolved runtime config
+const config = council.getConfig();
 
 // Get diagnostic snapshot (unstable across versions)
 const status = await council.getStatus();
@@ -215,6 +226,7 @@ Creates a council module.
 - `agents: AgentDefinition[]` - Agent definitions
 - `engines: Record<string, EngineAdapter>` - Engine implementations
 - `toolHost?: ToolHost` - Optional tool executor
+- `runtime?: Partial<CouncilRuntimeConfig>` - Optional library defaults for `initialMode`, `maxRounds`, and `maxAgentReplies`
 
 **Returns:** `CouncilModule`
 
@@ -222,10 +234,12 @@ Creates a council module.
 
 - `openCouncil(input)` - Create in-memory council instance
 - `listAgents()` - Get all agent definitions
+- `getConfig()` - Get resolved module runtime config
 
 ### Council
 
 - `getMode()` - Get current mode
+- `getConfig()` - Get resolved council instance config
 - `replay(entries)` - Replay persisted records (pure state reconstruction)
 - `post(event, options?)` - Process turn, returns `TurnResult`
 - `stream(event, options?)` - Stream turn execution events
@@ -249,37 +263,21 @@ interface TurnResult {
 
 ## Example Application
 
-See **[packages/cli](./packages/cli)** for a complete working CLI:
+The runnable example is the CLI in [packages/cli/README.md](./packages/cli/README.md).
+
+For the validated local-provider setup:
 
 ```bash
-cd packages/cli
 npm install
-npm run build
-npm start config.example.json
+npm run demo:local-cli
 ```
 
-## Configuration Example
+For CLI-specific configuration examples, see:
 
-```json
-{
-  "engines": [{
-    "id": "local-llm",
-    "provider": "http://localhost:1234",
-    "model": "your-model-name",
-    "contextWindow": 8192,
-    "settings": { "temperature": 0.7 }
-  }],
-  "agents": [{
-    "id": "analyst",
-    "name": "Analyst",
-    "icon": "📊",
-    "engine": "local-llm",
-    "summary": "Data analysis expert",
-    "systemPrompt": "You are an expert...",
-    "tools": ["ls", "cat"]
-  }]
-}
-```
+- [packages/cli/config.example.json](./packages/cli/config.example.json)
+- [packages/cli/config.local-provider.example.json](./packages/cli/config.local-provider.example.json)
+
+The core library itself does not require a JSON config file format.
 
 ## Contract Stability
 
@@ -303,36 +301,39 @@ council-of-experts/
 ├── packages/
 │   ├── core/                           # Main library
 │   │   ├── src/
+│   │   │   ├── config.ts               # Runtime default resolution
 │   │   │   ├── types.ts                # Contract types
 │   │   │   ├── CouncilImpl.ts          # Council implementation
 │   │   │   ├── CouncilModule.ts        # Factory
-│   │   │   └── utils.ts
+│   │   │   ├── utils.ts
+│   │   │   └── workflows/              # Mode executors
 │   │   └── dist/
 │   └── cli/                            # Example CLI application
 │       ├── src/
 │       │   ├── index.ts
 │       │   ├── ChatCompletionsEngine.ts # EngineAdapter implementation
-│       │   ├── tools.ts                # ToolHost example
+│       │   ├── tools.ts                # Built-in CLI tool host
+│       │   ├── session.ts
 │       │   ├── chat.ts
 │       │   └── config.ts
-│       └── config.example.json
+│       ├── config.example.json
+│       └── config.local-provider.example.json
 ```
 
 ## Development
 
 ```bash
-# Build core library
-cd packages/core
+# Install workspace dependencies
 npm install
+
+# Build all packages
 npm run build
 
-# Build CLI
-cd packages/cli
-npm install
-npm run build
+# Run tests
+npm test
 
-# Run CLI
-npm start config.example.json
+# Run the local-provider CLI example
+npm run demo:local-cli
 ```
 
 ## Use Cases
