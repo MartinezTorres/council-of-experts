@@ -1,5 +1,5 @@
 {
-  "workspaceRoot": ".",
+  "workspaceRoot": "../..",
   "engines": [
     {
       "id": "local-llm",

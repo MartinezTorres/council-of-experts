@@ -1,0 +1,44 @@
+{
+  "workspaceRoot": "../..",
+  "engines": [
+    {
+      "id": "local-qwen",
+      "provider": "http://localhost:5815",
+      "model": "Qwen3.5-27B",
+      "contextWindow": 8192,
+      "settings": {
+        "temperature": 0
+      }
+    }
+  ],
+  "agents": [
+    {
+      "id": "architect",
+      "name": "Architect",
+      "icon": "🏗",
+      "engine": "local-qwen",
+      "summary": "Focuses on system boundaries and API design",
+      "systemPrompt": "You analyze architecture and boundaries. Use ls and cat before making claims about the repository.",
+      "tools": ["ls", "cat"]
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "icon": "🔍",
+      "engine": "local-qwen",
+      "summary": "Focuses on correctness, regressions, and edge cases",
+      "systemPrompt": "You review behavior critically. Use ls and cat before making claims about the repository.",
+      "tools": ["ls", "cat"]
+    },
+    {
+      "id": "editor",
+      "name": "Editor",
+      "icon": "✍",
+      "engine": "local-qwen",
+      "summary": "Condenses discussion into concise decisions",
+      "systemPrompt": "You summarize technical discussions precisely. Use ls and cat before making claims about the repository.",
+      "tools": ["ls", "cat"]
+    }
+  ],
+  "timeout_ms": 90000
+}

@@ -5,6 +5,7 @@
  * Interactive chat interface demonstrating the council-of-experts library
  */
 
+import path from 'path';
 import { createCouncilModule } from 'council-of-experts';
 import type { EngineAdapter } from 'council-of-experts';
 import { ChatLoop } from './chat.js';
@@ -16,7 +17,7 @@ import { CouncilSession } from './session.js';
 async function main() {
   // Parse command line arguments
   const args = process.argv.slice(2);
-  const configPath = args[0] || getDefaultConfigPath();
+  const configPath = path.resolve(args[0] || getDefaultConfigPath());
 
   console.log(`Loading config from: ${configPath}`);
 
@@ -32,6 +33,10 @@ async function main() {
 
   // Build agent definitions from config
   const agentDefinitions = buildAgentDefinitions(config);
+  const workspaceRoot = path.resolve(
+    path.dirname(configPath),
+    config.workspaceRoot || '.'
+  );
 
   // Create engines map
   const engines: Record<string, EngineAdapter> = {};
@@ -42,7 +47,7 @@ async function main() {
   }
 
   // Create tool host
-  const toolHost = new CLIToolHost(config.workspaceRoot || process.cwd());
+  const toolHost = new CLIToolHost(workspaceRoot);
 
   // Create council module
   const councilModule = createCouncilModule({

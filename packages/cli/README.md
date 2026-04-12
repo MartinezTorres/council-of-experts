@@ -24,15 +24,47 @@ Copy `config.example.json` to `config.json` and adjust the engine URL/model.
 ### 3. Run the CLI
 
 ```bash
-npm run dev config.json
+npm run dev -- config.json
 ```
 
 Or build and run:
 
 ```bash
 npm run build
-npm start config.json
+npm start -- config.json
 ```
+
+## Local Provider Demo
+
+This repository now includes a runnable example config for the local provider you
+validated:
+
+- config: [config.local-provider.example.json](/opt/repos/util/neural-storm/council-of-experts/packages/cli/config.local-provider.example.json)
+- provider: `http://localhost:5815`
+- model: `Qwen3.5-27B`
+
+From the repository root:
+
+```bash
+npm run demo:local-cli
+```
+
+Then try these flows in the CLI:
+
+```text
+/mode council
+Review how this repository separates the core runtime from the CLI shell.
+
+/mode oracle
+Give one concrete recommendation for the next refactor.
+
+/messages all
+/status
+```
+
+The example config sets `workspaceRoot` relative to the config file, so it
+always points back to the repository root instead of depending on your current
+shell directory.
 
 ## Commands
 
