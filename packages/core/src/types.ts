@@ -45,13 +45,83 @@ export interface ToolDefinition {
 
 export type ToolRef = string | ToolDefinition;
 
+export interface PromptMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  name?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
+  tool_call_id?: string;
+}
+
+export interface PromptSummaryPolicy {
+  maxMessagesPerGroup?: number;
+  minGroupSnippetChars?: number;
+  minMessageSnippetChars?: number;
+  shrinkTargetRatio?: number;
+}
+
+export interface EngineRequestAttemptDebug {
+  attempt: number;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  outcome:
+    | 'success'
+    | 'retry'
+    | 'http_error'
+    | 'transport_error';
+  status?: number;
+  statusText?: string;
+  retryAfterMs?: number;
+  retryDelayMs?: number;
+  error?: {
+    name?: string;
+    message: string;
+    code?: string;
+  };
+}
+
+export interface EngineRequestDebug {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  startDelayMs: number;
+  attempts: number;
+  retryCount: number;
+  totalRetryDelayMs: number;
+  finalOutcome: 'success' | 'timeout' | 'error';
+  attemptDetails: EngineRequestAttemptDebug[];
+}
+
+export interface CouncilPromptConfig {
+  councilModeSystemAddendum?: string;
+  oracleModeSystemAddendum?: string;
+  councilSynthesisTemplate?: string;
+  oracleSynthesisTemplate?: string;
+}
+
+export interface ResolvedCouncilPromptConfig {
+  councilModeSystemAddendum: string;
+  oracleModeSystemAddendum: string;
+  councilSynthesisTemplate: string;
+  oracleSynthesisTemplate: string;
+}
+
 export interface EngineSpec {
   id: string;
   provider?: string;
   model: string;
   contextWindow?: number;
   charsPerToken?: number;
-  responseReserveTokens?: number;
+  promptBudgetRatio?: number;
+  promptSummaryPolicy?: PromptSummaryPolicy;
   settings?: Record<string, unknown>;
 }
 
@@ -79,6 +149,7 @@ export interface ChatEvent {
     name?: string;
   };
   content: string;
+  promptMessages?: PromptMessage[];
   timestamp?: string | number | Date;
   metadata?: Record<string, unknown>;
 }
@@ -128,6 +199,7 @@ export interface EngineInput {
   mode: CouncilMode;
   event: ChatEvent;
   history: CouncilMessage[];
+  promptConfig?: ResolvedCouncilPromptConfig;
   tools?: ToolDefinition[];
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
@@ -149,22 +221,28 @@ export interface CouncilModuleConfig {
   engines: Record<string, EngineAdapter>;
   toolHost?: ToolHost;
   runtime?: Partial<CouncilRuntimeConfig>;
+  prompts?: Partial<CouncilPromptConfig>;
 }
 
 export interface CouncilRuntimeConfig {
   initialMode: CouncilMode;
   maxRounds: number;
   maxAgentReplies?: number;
+  agentSelectionStrategy: 'all_in_order';
+  oracleSpeakerStrategy: 'first_active' | 'by_id';
+  oracleSpeakerAgentId?: string;
 }
 
 export interface CouncilModuleResolvedConfig {
   runtime: CouncilRuntimeConfig;
+  prompts: ResolvedCouncilPromptConfig;
 }
 
 export interface CouncilInstanceResolvedConfig {
   councilId: string;
   initialMode: CouncilMode;
   runtime: CouncilRuntimeConfig;
+  prompts: ResolvedCouncilPromptConfig;
   metadata?: Record<string, unknown>;
 }
 
@@ -173,6 +251,7 @@ export interface TurnOptions {
   maxRounds?: number;
   maxAgentReplies?: number;
   emitPublicOracle?: boolean;
+  oracleSpeakerAgentId?: string;
   trace?: boolean;
 }
 

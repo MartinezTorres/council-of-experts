@@ -21,6 +21,7 @@ import {
   TurnError,
   COUNCIL_CONTRACT_VERSION,
   CouncilRuntimeConfig,
+  ResolvedCouncilPromptConfig,
 } from './types.js';
 import { createCouncilConfigSnapshot } from './config.js';
 import { generateId } from './utils.js';
@@ -47,6 +48,7 @@ interface CouncilState {
 export class CouncilImpl implements Council {
   private state: CouncilState;
   private runtimeConfig: CouncilRuntimeConfig;
+  private promptConfig: ResolvedCouncilPromptConfig;
   private agents: Map<string, AgentDefinition>;
   private engines: Map<string, EngineAdapter>;
   private toolHost?: ToolHost;
@@ -55,6 +57,7 @@ export class CouncilImpl implements Council {
     councilId: string,
     initialMode: CouncilMode,
     runtimeConfig: CouncilRuntimeConfig,
+    promptConfig: ResolvedCouncilPromptConfig,
     agents: AgentDefinition[],
     engines: Record<string, EngineAdapter>,
     toolHost?: ToolHost,
@@ -73,6 +76,15 @@ export class CouncilImpl implements Council {
       initialMode: runtimeConfig.initialMode,
       maxRounds: runtimeConfig.maxRounds,
       maxAgentReplies: runtimeConfig.maxAgentReplies,
+      agentSelectionStrategy: runtimeConfig.agentSelectionStrategy,
+      oracleSpeakerStrategy: runtimeConfig.oracleSpeakerStrategy,
+      oracleSpeakerAgentId: runtimeConfig.oracleSpeakerAgentId,
+    };
+    this.promptConfig = {
+      councilModeSystemAddendum: promptConfig.councilModeSystemAddendum,
+      oracleModeSystemAddendum: promptConfig.oracleModeSystemAddendum,
+      councilSynthesisTemplate: promptConfig.councilSynthesisTemplate,
+      oracleSynthesisTemplate: promptConfig.oracleSynthesisTemplate,
     };
     this.agents = new Map(agents.map((a) => [a.id, a]));
     this.engines = new Map(Object.entries(engines));
@@ -88,6 +100,7 @@ export class CouncilImpl implements Council {
       councilId: this.state.councilId,
       initialMode: this.state.initialMode,
       runtime: this.runtimeConfig,
+      prompts: this.promptConfig,
       metadata: this.state.metadata,
     });
   }
@@ -136,6 +149,10 @@ export class CouncilImpl implements Council {
     const turnId = generateId();
     const mode = options?.mode ?? this.state.mode;
     const activeAgents = this.selectAgents(options);
+    const oracleSpeakerSelection =
+      mode === 'oracle'
+        ? this.resolveOracleSpeaker(activeAgents, options)
+        : { agent: undefined, error: undefined };
     const workflowDeps = this.createWorkflowDependencies();
     const records: CouncilRecord[] = [];
     const publicMessages: CouncilMessage[] = [];
@@ -203,6 +220,8 @@ export class CouncilImpl implements Council {
             event,
             options,
             activeAgents,
+            oracleSpeaker: oracleSpeakerSelection.agent,
+            oracleSpeakerError: oracleSpeakerSelection.error,
             stateMessages: this.state.messages,
             publicMessages,
             privateMessages,
@@ -249,6 +268,10 @@ export class CouncilImpl implements Council {
     const turnId = generateId();
     const mode = options?.mode ?? this.state.mode;
     const activeAgents = this.selectAgents(options);
+    const oracleSpeakerSelection =
+      mode === 'oracle'
+        ? this.resolveOracleSpeaker(activeAgents, options)
+        : { agent: undefined, error: undefined };
     const workflowDeps = this.createWorkflowDependencies();
 
     // Buffer for messages emitted this turn - committed to state after turn completes
@@ -316,6 +339,8 @@ export class CouncilImpl implements Council {
             event,
             options,
             activeAgents,
+            oracleSpeaker: oracleSpeakerSelection.agent,
+            oracleSpeakerError: oracleSpeakerSelection.error,
             stateMessages: this.state.messages,
             pendingMessages,
           },
@@ -442,6 +467,7 @@ export class CouncilImpl implements Council {
         ),
       recordTurnError: (turnId, records, errors, error, agentId) =>
         this.recordTurnError(turnId, records, errors, error, agentId),
+      prompts: this.promptConfig,
     };
   }
 
@@ -707,6 +733,7 @@ export class CouncilImpl implements Council {
         mode,
         event,
         history,
+        promptConfig: this.promptConfig,
         tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
         toolCalls: toolCallsHistory.length > 0 ? toolCallsHistory : undefined,
         toolResults: toolResultsHistory.length > 0 ? toolResultsHistory : undefined,
@@ -793,6 +820,7 @@ export class CouncilImpl implements Council {
         mode,
         event,
         history,
+        promptConfig: this.promptConfig,
         tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
         toolCalls: toolCallsHistory.length > 0 ? toolCallsHistory : undefined,
         toolResults: toolResultsHistory.length > 0 ? toolResultsHistory : undefined,
@@ -924,12 +952,54 @@ export class CouncilImpl implements Council {
   }
 
   private selectAgents(options: TurnOptions | undefined): AgentDefinition[] {
-    // Simple agent selection: all agents participate
-    // Future: implement relevance checking, @mentions, etc.
     const maxAgents =
       options?.maxAgentReplies ??
       this.runtimeConfig.maxAgentReplies ??
       this.agents.size;
-    return Array.from(this.agents.values()).slice(0, maxAgents);
+    switch (this.runtimeConfig.agentSelectionStrategy) {
+      case 'all_in_order':
+      default:
+        return Array.from(this.agents.values()).slice(0, maxAgents);
+    }
+  }
+
+  private resolveOracleSpeaker(
+    activeAgents: AgentDefinition[],
+    options: TurnOptions | undefined
+  ): {
+    agent?: AgentDefinition;
+    error?: CouncilError;
+  } {
+    if (activeAgents.length === 0) {
+      return {};
+    }
+
+    const requestedAgentId =
+      options?.oracleSpeakerAgentId ??
+      (this.runtimeConfig.oracleSpeakerStrategy === 'by_id'
+        ? this.runtimeConfig.oracleSpeakerAgentId
+        : undefined);
+
+    if (!requestedAgentId) {
+      return {
+        agent: activeAgents[0],
+      };
+    }
+
+    const agent = activeAgents.find((entry) => entry.id === requestedAgentId);
+    if (agent) {
+      return { agent };
+    }
+
+    return {
+      error: {
+        code: 'oracle_speaker_unavailable',
+        message: `Oracle speaker agent ${requestedAgentId} is not active for this turn`,
+        data: {
+          requestedAgentId,
+          activeAgentIds: activeAgents.map((entry) => entry.id),
+        },
+      },
+    };
   }
 }

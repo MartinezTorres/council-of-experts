@@ -1,7 +1,12 @@
 {
   "workspaceRoot": "../..",
   "runtime": {
-    "initialMode": "open"
+    "initialMode": "open",
+    "agentSelectionStrategy": "all_in_order",
+    "oracleSpeakerStrategy": "first_active"
+  },
+  "prompts": {
+    "oracleSynthesisTemplate": "You are the Oracle.\\n\\nPrivate deliberation:\\n{{privateThoughts}}\\n\\nRespond with one unified answer."
   },
   "agents": [
     {
@@ -14,6 +19,8 @@
       "engine": {
         "provider": "http://localhost:1234",
         "model": "your-model-name",
+        "contextWindow": 8192,
+        "charsPerToken": 4,
         "settings": {
           "api_key": "",
           "temperature": 0.2
@@ -31,6 +38,8 @@
       "engine": {
         "provider": "http://localhost:1234",
         "model": "your-model-name",
+        "contextWindow": 8192,
+        "charsPerToken": 4,
         "settings": {
           "api_key": "",
           "temperature": 0.2
@@ -48,6 +57,8 @@
       "engine": {
         "provider": "http://localhost:1234",
         "model": "your-model-name",
+        "contextWindow": 8192,
+        "charsPerToken": 4,
         "settings": {
           "api_key": "",
           "temperature": 0.2

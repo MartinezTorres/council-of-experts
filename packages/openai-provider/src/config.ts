@@ -1,6 +1,10 @@
 import { readFileSync, statSync } from 'fs';
 import path from 'path';
-import { resolveCouncilRuntimeConfig } from 'council-of-experts';
+import {
+  resolveCouncilPromptConfig,
+  resolveCouncilRuntimeConfig,
+  type PromptSummaryPolicy,
+} from 'council-of-experts';
 import type {
   ProviderAgentDocumentConfig,
   ProviderAgentConfig,
@@ -10,6 +14,7 @@ import type {
   ResolvedProviderConfig,
   ResolvedVirtualModelConfig,
 } from './types.js';
+import { resolveProviderPromptConfig } from './prompts.js';
 
 function assertNonEmptyString(value: unknown, field: string): string {
   if (typeof value === 'string' && value.trim().length > 0) {
@@ -40,12 +45,77 @@ function assertNonNegativeInteger(value: unknown, field: string): number {
   throw new Error(`Invalid ${field}: expected a non-negative integer`);
 }
 
+function assertPositiveInteger(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected a positive integer`);
+}
+
+function assertContextWindow(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 1) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected an integer greater than 1`);
+}
+
 function assertPositiveNumber(value: unknown, field: string): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return value;
   }
 
   throw new Error(`Invalid ${field}: expected a positive number`);
+}
+
+function assertRatio(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 1) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected a number greater than 0 and less than 1`);
+}
+
+function validatePromptSummaryPolicy(
+  value: PromptSummaryPolicy | undefined,
+  field: string
+): PromptSummaryPolicy | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!value || typeof value !== 'object') {
+    throw new Error(`Invalid ${field}: expected an object`);
+  }
+
+  return {
+    maxMessagesPerGroup:
+      value.maxMessagesPerGroup === undefined
+        ? undefined
+        : assertPositiveInteger(
+            value.maxMessagesPerGroup,
+            `${field}.maxMessagesPerGroup`
+          ),
+    minGroupSnippetChars:
+      value.minGroupSnippetChars === undefined
+        ? undefined
+        : assertPositiveInteger(
+            value.minGroupSnippetChars,
+            `${field}.minGroupSnippetChars`
+          ),
+    minMessageSnippetChars:
+      value.minMessageSnippetChars === undefined
+        ? undefined
+        : assertPositiveInteger(
+            value.minMessageSnippetChars,
+            `${field}.minMessageSnippetChars`
+          ),
+    shrinkTargetRatio:
+      value.shrinkTargetRatio === undefined
+        ? undefined
+        : assertRatio(value.shrinkTargetRatio, `${field}.shrinkTargetRatio`),
+  };
 }
 
 function resolveDocument(
@@ -108,6 +178,25 @@ function validateAgent(
     }
     seenDocumentPaths.add(document.path);
   }
+  const contextWindow = assertContextWindow(
+    agent.engine?.contextWindow,
+    `${prefix}.engine.contextWindow`
+  );
+  const charsPerToken = assertPositiveNumber(
+    agent.engine?.charsPerToken,
+    `${prefix}.engine.charsPerToken`
+  );
+  const promptBudgetRatio =
+    agent.engine?.promptBudgetRatio === undefined
+      ? undefined
+      : assertRatio(
+          agent.engine.promptBudgetRatio,
+          `${prefix}.engine.promptBudgetRatio`
+        );
+  const promptSummaryPolicy = validatePromptSummaryPolicy(
+    agent.engine?.promptSummaryPolicy,
+    `${prefix}.engine.promptSummaryPolicy`
+  );
 
   return {
     id: agentId,
@@ -123,35 +212,15 @@ function validateAgent(
     engine: {
       provider: assertNonEmptyString(agent.engine?.provider, `${prefix}.engine.provider`),
       model: assertNonEmptyString(agent.engine?.model, `${prefix}.engine.model`),
-      contextWindow:
-        agent.engine?.contextWindow === undefined
-          ? undefined
-          : assertNonNegativeInteger(
-              agent.engine.contextWindow,
-              `${prefix}.engine.contextWindow`
-            ),
-      charsPerToken:
-        agent.engine?.charsPerToken === undefined
-          ? undefined
-          : assertPositiveNumber(
-              agent.engine.charsPerToken,
-              `${prefix}.engine.charsPerToken`
-            ),
-      responseReserveTokens:
-        agent.engine?.responseReserveTokens === undefined
-          ? undefined
-          : assertNonNegativeInteger(
-              agent.engine.responseReserveTokens,
-              `${prefix}.engine.responseReserveTokens`
-            ),
+      contextWindow,
+      charsPerToken,
+      promptBudgetRatio,
+      promptSummaryPolicy,
       settings: agent.engine?.settings,
-      timeoutMs:
-        agent.engine?.timeoutMs === undefined
-          ? undefined
-          : assertNonNegativeInteger(
-              agent.engine.timeoutMs,
-              `${prefix}.engine.timeoutMs`
-            ),
+      timeoutMs: assertPositiveInteger(
+        agent.engine?.timeoutMs,
+        `${prefix}.engine.timeoutMs`
+      ),
     },
   };
 }
@@ -179,6 +248,15 @@ function validateVirtualModel(
     }
     seen.add(agent.id);
   }
+  const synthesizerAgentId = assertNonEmptyString(
+    config.synthesizerAgentId,
+    `virtualModels.${modelId}.synthesizerAgentId`
+  );
+  if (!agents.some((agent) => agent.id === synthesizerAgentId)) {
+    throw new Error(
+      `Unknown synthesizerAgentId '${synthesizerAgentId}' in virtualModels.${modelId}`
+    );
+  }
 
   return {
     id: modelId,
@@ -187,6 +265,8 @@ function validateVirtualModel(
         ? undefined
         : assertNonEmptyString(config.description, `virtualModels.${modelId}.description`),
     runtime: resolveCouncilRuntimeConfig(config.runtime),
+    councilPrompts: resolveCouncilPromptConfig(config.councilPrompts),
+    synthesizerAgentId,
     agents,
   };
 }
@@ -229,7 +309,30 @@ export function loadConfig(configPath: string): ResolvedProviderConfig {
     },
     debug: {
       enabled: raw.debug?.enabled ?? false,
+      traceRetention:
+        raw.debug?.traceRetention === undefined
+          ? 100
+          : assertPositiveInteger(raw.debug.traceRetention, 'debug.traceRetention'),
     },
+    limits: {
+      requestBodyBytes:
+        raw.limits?.requestBodyBytes === undefined
+          ? 1_000_000
+          : assertPositiveInteger(
+              raw.limits.requestBodyBytes,
+              'limits.requestBodyBytes'
+            ),
+    },
+    fallbacks: {
+      agentContextExhaustedMessage:
+        raw.fallbacks?.agentContextExhaustedMessage === undefined
+          ? "It's dizzy."
+          : assertNonEmptyString(
+              raw.fallbacks.agentContextExhaustedMessage,
+              'fallbacks.agentContextExhaustedMessage'
+            ),
+    },
+    prompts: resolveProviderPromptConfig(raw.prompts),
     virtualModels,
   };
 }

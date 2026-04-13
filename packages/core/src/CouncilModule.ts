@@ -12,6 +12,7 @@ import {
   createModuleConfigSnapshot,
   resolveCouncilRuntimeConfig,
 } from './config.js';
+import { resolveCouncilPromptConfig } from './prompts.js';
 import { CouncilImpl } from './CouncilImpl.js';
 
 class CouncilModuleImpl implements CouncilModule {
@@ -25,7 +26,8 @@ class CouncilModuleImpl implements CouncilModule {
     this.engines = config.engines;
     this.toolHost = config.toolHost;
     this.config = createModuleConfigSnapshot(
-      resolveCouncilRuntimeConfig(config.runtime)
+      resolveCouncilRuntimeConfig(config.runtime),
+      resolveCouncilPromptConfig(config.prompts)
     );
   }
 
@@ -36,6 +38,7 @@ class CouncilModuleImpl implements CouncilModule {
       input.councilId,
       initialMode,
       this.config.runtime,
+      this.config.prompts,
       this.agents,
       this.engines,
       this.toolHost,
@@ -48,7 +51,7 @@ class CouncilModuleImpl implements CouncilModule {
   }
 
   getConfig(): CouncilModuleResolvedConfig {
-    return createModuleConfigSnapshot(this.config.runtime);
+    return createModuleConfigSnapshot(this.config.runtime, this.config.prompts);
   }
 }
 

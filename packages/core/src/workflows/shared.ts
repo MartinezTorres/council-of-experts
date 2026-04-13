@@ -8,9 +8,11 @@ import {
   CouncilRuntimeEvent,
   CouncilMode,
   EngineOutput,
+  ResolvedCouncilPromptConfig,
   TurnError,
   TurnOptions,
 } from '../types.js';
+import { isAgentContextExhaustedError } from '../errors.js';
 import { generateId } from '../utils.js';
 
 export interface ExecuteWorkflowInput {
@@ -19,6 +21,8 @@ export interface ExecuteWorkflowInput {
   event: ChatEvent;
   options: TurnOptions | undefined;
   activeAgents: AgentDefinition[];
+  oracleSpeaker?: AgentDefinition;
+  oracleSpeakerError?: CouncilError;
   stateMessages: CouncilMessage[];
   publicMessages: CouncilMessage[];
   privateMessages: CouncilMessage[];
@@ -32,11 +36,14 @@ export interface StreamWorkflowInput {
   event: ChatEvent;
   options: TurnOptions | undefined;
   activeAgents: AgentDefinition[];
+  oracleSpeaker?: AgentDefinition;
+  oracleSpeakerError?: CouncilError;
   stateMessages: CouncilMessage[];
   pendingMessages: CouncilMessage[];
 }
 
 export interface WorkflowDependencies {
+  prompts: ResolvedCouncilPromptConfig;
   generateWithTools: (
     turnId: string,
     agent: AgentDefinition,
@@ -185,4 +192,34 @@ export function createDerivedEvent(
     ...event,
     content,
   };
+}
+
+export function toWorkflowCouncilError(
+  error: unknown,
+  fallback: CouncilError
+): CouncilError {
+  if (isAgentContextExhaustedError(error)) {
+    return error.toCouncilError();
+  }
+
+  if (error && typeof error === 'object') {
+    const councilErrorData = (error as { councilErrorData?: unknown }).councilErrorData;
+    if (councilErrorData !== undefined) {
+      return {
+        ...fallback,
+        data:
+          fallback.data &&
+          typeof fallback.data === 'object' &&
+          councilErrorData &&
+          typeof councilErrorData === 'object'
+            ? {
+                ...(fallback.data as Record<string, unknown>),
+                ...(councilErrorData as Record<string, unknown>),
+              }
+            : councilErrorData,
+      };
+    }
+  }
+
+  return fallback;
 }

@@ -91,7 +91,12 @@ The config file uses this shape:
 {
   "workspaceRoot": "../..",
   "runtime": {
-    "initialMode": "open"
+    "initialMode": "open",
+    "agentSelectionStrategy": "all_in_order",
+    "oracleSpeakerStrategy": "first_active"
+  },
+  "prompts": {
+    "oracleSynthesisTemplate": "You are the Oracle.\\n\\nPrivate deliberation:\\n{{privateThoughts}}\\n\\nRespond with one unified answer."
   },
   "agents": [
     {
@@ -104,6 +109,8 @@ The config file uses this shape:
       "engine": {
         "provider": "http://localhost:1234",
         "model": "your-model-name",
+        "contextWindow": 8192,
+        "charsPerToken": 4,
         "settings": {
           "api_key": "",
           "temperature": 0.2
@@ -116,7 +123,11 @@ The config file uses this shape:
 ```
 
 `workspaceRoot` is resolved relative to the config file location, not the
-current shell directory.
+current shell directory. The built-in OpenAI-compatible adapter also accepts
+optional `promptBudgetRatio` and `promptSummaryPolicy` on each agent engine if
+you want to make prompt-packing policy explicit in the demo. The top-level
+optional `prompts` block maps directly to `createCouncilModule({ prompts })`
+for the built-in council/oracle workflow templates.
 
 ## Architecture
 

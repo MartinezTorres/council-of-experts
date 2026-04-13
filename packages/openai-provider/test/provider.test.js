@@ -87,8 +87,16 @@ function createFakeEngine() {
   return {
     async generate(input) {
       const prompt = input.event.content;
+      const promptMessages = input.event.promptMessages ?? [];
+      const promptMessageText = JSON.stringify(promptMessages);
+      const toolResultText =
+        input.toolResults?.map((result) => result.content ?? '').join('\n') ?? '';
 
-      if ((input.tools?.length ?? 0) > 0 && !prompt.includes('[tool')) {
+      if (
+        (input.tools?.length ?? 0) > 0 &&
+        !promptMessageText.includes('sunny') &&
+        !toolResultText.includes('sunny')
+      ) {
         return {
           content: '',
           toolCalls: [
@@ -103,7 +111,7 @@ function createFakeEngine() {
         };
       }
 
-      if (prompt.includes('[tool') && prompt.includes('sunny')) {
+      if (promptMessageText.includes('sunny') || toolResultText.includes('sunny')) {
         return {
           content: 'It is sunny in Berlin.',
         };
@@ -158,11 +166,19 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
     },
     debug: {
       enabled: true,
+      traceRetention: 10,
+    },
+    limits: {
+      requestBodyBytes: 1_000_000,
+    },
+    fallbacks: {
+      agentContextExhaustedMessage: "It's dizzy.",
     },
     virtualModels: {
       'oracle-test': {
         id: 'oracle-test',
         description: 'Test model',
+        synthesizerAgentId: 'a',
         runtime: {
           maxRounds: 1,
           maxAgentReplies: 2,
@@ -177,6 +193,8 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
               provider: 'http://example.test',
               model: 'stub-model',
               contextWindow: 1024,
+              charsPerToken: 4,
+              timeoutMs: 1000,
             },
           },
           {
@@ -188,6 +206,8 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
               provider: 'http://example.test',
               model: 'stub-model',
               contextWindow: 1024,
+              charsPerToken: 4,
+              timeoutMs: 1000,
             },
           },
         ],
@@ -198,6 +218,7 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
   app.modelRuntimes.set('oracle-test', {
     id: 'oracle-test',
     description: 'Test model',
+    synthesizerAgentId: 'a',
     documentVault: new DocumentVault({}),
     agents: [
       {
@@ -240,11 +261,14 @@ test('provider resolves virtual models, chat completions, and debug traces', asy
   const debugStatus = app.getDebugStatus();
   assert.equal(debugStatus.virtualModels.length, 1);
   assert.equal(debugStatus.virtualModels[0].stats.successCount, 1);
+  assert.equal(debugStatus.virtualModels[0].stats.degradedCount, 0);
 
   assert.equal(app.recentTraces.length, 1);
   assert.equal(app.recentTraces[0].council.publicMessages.length, 0);
   assert.equal(app.recentTraces[0].council.privateMessages.length, 2);
-  assert.match(app.recentTraces[0].transcript, /Conversation transcript:/);
+  assert.equal(app.recentTraces[0].council.agentExecutions.length, 2);
+  assert.equal(app.recentTraces[0].council.agentExecutions[0].status, 'succeeded');
+  assert.match(app.recentTraces[0].debugTranscript, /Conversation transcript:/);
 });
 
 test('provider returns OpenAI tool calls and can follow up from tool results statelessly', async () => {
@@ -256,11 +280,19 @@ test('provider returns OpenAI tool calls and can follow up from tool results sta
     },
     debug: {
       enabled: true,
+      traceRetention: 10,
+    },
+    limits: {
+      requestBodyBytes: 1_000_000,
+    },
+    fallbacks: {
+      agentContextExhaustedMessage: "It's dizzy.",
     },
     virtualModels: {
       'oracle-tools': {
         id: 'oracle-tools',
         description: 'Tool model',
+        synthesizerAgentId: 'synth',
         runtime: {
           maxRounds: 1,
           maxAgentReplies: 2,
@@ -275,6 +307,8 @@ test('provider returns OpenAI tool calls and can follow up from tool results sta
               provider: 'http://example.test',
               model: 'stub-model',
               contextWindow: 1024,
+              charsPerToken: 4,
+              timeoutMs: 1000,
             },
           },
           {
@@ -286,6 +320,8 @@ test('provider returns OpenAI tool calls and can follow up from tool results sta
               provider: 'http://example.test',
               model: 'stub-model',
               contextWindow: 1024,
+              charsPerToken: 4,
+              timeoutMs: 1000,
             },
           },
         ],
@@ -296,6 +332,7 @@ test('provider returns OpenAI tool calls and can follow up from tool results sta
   app.modelRuntimes.set('oracle-tools', {
     id: 'oracle-tools',
     description: 'Tool model',
+    synthesizerAgentId: 'synth',
     documentVault: new DocumentVault({}),
     agents: [
       {
@@ -374,6 +411,272 @@ test('provider returns OpenAI tool calls and can follow up from tool results sta
   assert.equal(secondResponse.choices[0].message.content, 'It is sunny in Berlin.');
 });
 
+test('provider prompt overrides drive request mapping and oracle synthesis prompts', async () => {
+  let capturedCouncilEvent;
+  const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'council-openai-provider-prompts-'));
+  mkdirSync(path.join(fixtureDir, 'docs'));
+  writeFileSync(
+    path.join(fixtureDir, 'docs', 'brief.txt'),
+    'Prompt test document.',
+    'utf8'
+  );
+
+  const customCouncilModule = {
+    async openCouncil() {
+      return {
+        async post(event) {
+          capturedCouncilEvent = event;
+          return createResult(false);
+        },
+        async getStatus() {
+          return { mode: 'oracle', messageCount: 2 };
+        },
+        getConfig() {
+          return {
+            councilId: 'request-1',
+            initialMode: 'oracle',
+            runtime: {
+              initialMode: 'open',
+              maxRounds: 1,
+              maxAgentReplies: 2,
+            },
+          };
+        },
+        async dispose() {},
+      };
+    },
+    getConfig() {
+      return {
+        runtime: {
+          initialMode: 'open',
+          maxRounds: 1,
+          maxAgentReplies: 2,
+        },
+      };
+    },
+  };
+
+  const customEngine = {
+    async generate(input) {
+      if (input.event.content.includes('CUSTOM PREPARATION PROMPT')) {
+        return { content: 'draft from custom preparation' };
+      }
+
+      if (input.event.content.includes('CUSTOM FINAL PROMPT')) {
+        return { content: 'final answer from custom synthesis' };
+      }
+
+      return { content: 'unexpected' };
+    },
+  };
+
+  const app = new CouncilOpenAIProviderApp({
+    server: {
+      host: '127.0.0.1',
+      port: 0,
+      apiKeys: [],
+    },
+    debug: {
+      enabled: true,
+      traceRetention: 10,
+    },
+    limits: {
+      requestBodyBytes: 1_000_000,
+    },
+    fallbacks: {
+      agentContextExhaustedMessage: "It's dizzy.",
+    },
+    prompts: {
+      requestInstruction: 'CUSTOM REQUEST INSTRUCTION',
+      oraclePreparationTemplate:
+        'CUSTOM PREPARATION PROMPT\n{{privateDeliberation}}\n{{localDocumentsInstruction}}',
+      oracleExternalSynthesisTemplate:
+        'CUSTOM FINAL PROMPT\n{{privateDeliberation}}\n{{draftContent}}',
+    },
+    virtualModels: {
+      'oracle-prompts': {
+        id: 'oracle-prompts',
+        description: 'Prompt model',
+        synthesizerAgentId: 'synth',
+        runtime: {
+          maxRounds: 1,
+          maxAgentReplies: 2,
+        },
+        agents: [
+          {
+            id: 'synth',
+            name: 'Synth',
+            summary: 'Synthesizer',
+            systemPrompt: 'Use custom prompts.',
+            documents: [
+              {
+                path: 'docs/brief.txt',
+              },
+            ],
+            engine: {
+              provider: 'http://example.test',
+              model: 'stub-model',
+              contextWindow: 1024,
+              charsPerToken: 4,
+              timeoutMs: 1000,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  app.modelRuntimes.set('oracle-prompts', {
+    id: 'oracle-prompts',
+    description: 'Prompt model',
+    synthesizerAgentId: 'synth',
+    documentVault: new DocumentVault({
+      synth: [
+        {
+          path: 'docs/brief.txt',
+          absolutePath: path.join(fixtureDir, 'docs', 'brief.txt'),
+        },
+      ],
+    }),
+    agents: [
+      {
+        id: 'synth',
+        name: 'Synth',
+        engine: {
+          id: 'oracle-prompts:synth',
+        },
+      },
+    ],
+    councilModule: customCouncilModule,
+    engines: {
+      'oracle-prompts:synth': customEngine,
+    },
+  });
+
+  const response = await app.handleChatCompletions({
+    model: 'oracle-prompts',
+    messages: [
+      {
+        role: 'user',
+        content: 'Say hello.',
+      },
+    ],
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'noop_tool',
+        },
+      },
+    ],
+  });
+
+  assert.equal(capturedCouncilEvent.content, 'CUSTOM REQUEST INSTRUCTION');
+  assert.equal(
+    response.choices[0].message.content,
+    'final answer from custom synthesis'
+  );
+});
+
+test('provider forwards structured OpenAI chat history to the shared prompt packer', async () => {
+  const app = new CouncilOpenAIProviderApp({
+    server: {
+      host: '127.0.0.1',
+      port: 0,
+      apiKeys: [],
+    },
+    debug: {
+      enabled: true,
+      traceRetention: 10,
+    },
+    limits: {
+      requestBodyBytes: 1_000_000,
+    },
+    fallbacks: {
+      agentContextExhaustedMessage: "It's dizzy.",
+    },
+    virtualModels: {
+      'oracle-packed-history': {
+        id: 'oracle-packed-history',
+        description: 'Packed history model',
+        synthesizerAgentId: 'editor',
+        runtime: {
+          maxRounds: 1,
+          maxAgentReplies: 1,
+        },
+        agents: [
+          {
+            id: 'editor',
+            name: 'Editor',
+            summary: 'Synthesizer',
+            systemPrompt: 'Respond in one short sentence.',
+            engine: {
+              provider: 'http://example.test',
+              model: 'stub-model',
+              contextWindow: 1024,
+              charsPerToken: 4,
+              timeoutMs: 1000,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const requestBodies = [];
+  app.modelRuntimes.get('oracle-packed-history').engines[
+    'oracle-packed-history:editor'
+  ].sendRequest = async ({ body }) => {
+    requestBodies.push(JSON.parse(body));
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers(),
+      bodyText: JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: 'final oracle answer',
+            },
+          },
+        ],
+      }),
+    };
+  };
+
+  const response = await app.handleChatCompletions({
+    model: 'oracle-packed-history',
+    messages: [
+      {
+        role: 'user',
+        content: 'First question',
+      },
+      {
+        role: 'assistant',
+        content: 'First answer',
+      },
+      {
+        role: 'user',
+        content: 'Second question',
+      },
+    ],
+  });
+
+  assert.equal(response.choices[0].message.content, 'final oracle answer');
+  assert.ok(requestBodies.length >= 2);
+  assert.equal(requestBodies[0].messages[1].role, 'user');
+  assert.equal(requestBodies[0].messages[1].content, 'First question');
+  assert.equal(requestBodies[0].messages[2].role, 'assistant');
+  assert.equal(requestBodies[0].messages[2].content, 'First answer');
+  assert.equal(requestBodies[0].messages[3].role, 'user');
+  assert.equal(requestBodies[0].messages[3].content, 'Second question');
+  assert.doesNotMatch(
+    requestBodies[0].messages.at(-1).content,
+    /Conversation transcript:/
+  );
+});
+
 test('provider lets the oracle read assigned documents with vault.read(path)', async () => {
   const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'council-openai-provider-'));
   mkdirSync(path.join(fixtureDir, 'docs'));
@@ -397,6 +700,7 @@ test('provider lets the oracle read assigned documents with vault.read(path)', a
         virtualModels: {
           'oracle-docs': {
             description: 'Oracle with documents',
+            synthesizerAgentId: 'editor',
             runtime: {
               maxRounds: 2,
               maxAgentReplies: 1,
@@ -417,6 +721,8 @@ test('provider lets the oracle read assigned documents with vault.read(path)', a
                   provider: 'http://example.test',
                   model: 'stub-model',
                   contextWindow: 1024,
+                  charsPerToken: 4,
+                  timeoutMs: 1000,
                 },
               },
             ],
@@ -459,4 +765,238 @@ test('provider lets the oracle read assigned documents with vault.read(path)', a
     app.recentTraces[0].synthesis.localToolResults[0].data.path,
     'docs/brief.txt'
   );
+});
+
+test('vault.read returns the full assigned document content', async () => {
+  const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'council-openai-provider-'));
+  mkdirSync(path.join(fixtureDir, 'docs'));
+  writeFileSync(
+    path.join(fixtureDir, 'docs', 'large.txt'),
+    '0123456789'.repeat(80),
+    'utf8'
+  );
+  writeFileSync(
+    path.join(fixtureDir, 'provider.json'),
+    JSON.stringify(
+      {
+        server: {
+          host: '127.0.0.1',
+          port: 8787,
+          apiKeys: [],
+        },
+        debug: {
+          enabled: true,
+        },
+        virtualModels: {
+          'oracle-docs': {
+            description: 'Oracle with documents',
+            synthesizerAgentId: 'editor',
+            runtime: {
+              maxRounds: 2,
+              maxAgentReplies: 1,
+            },
+            agents: [
+              {
+                id: 'editor',
+                name: 'Editor',
+                summary: 'Synthesizer',
+                systemPrompt: 'Use documents when they help.',
+                documents: [
+                  {
+                    path: 'docs/large.txt',
+                    description: 'Large architecture note',
+                  },
+                ],
+                engine: {
+                  provider: 'http://example.test',
+                  model: 'stub-model',
+                  contextWindow: 100,
+                  charsPerToken: 4,
+                  timeoutMs: 1000,
+                },
+              },
+            ],
+          },
+        },
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+
+  const config = loadConfig(path.join(fixtureDir, 'provider.json'));
+  const app = new CouncilOpenAIProviderApp(config);
+  const runtime = app.modelRuntimes.get('oracle-docs');
+
+  assert.ok(runtime);
+
+  const result = await runtime.documentVault.executeForAgent('editor', {
+    name: 'vault.read',
+    args: {
+      path: 'docs/large.txt',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.path, 'docs/large.txt');
+  assert.match(result.content, /^Path: docs\/large.txt/);
+  assert.match(result.content, /01234567890123456789/);
+});
+
+test('provider agents must declare contextWindow, charsPerToken, and timeoutMs', () => {
+  const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'council-openai-provider-'));
+  mkdirSync(path.join(fixtureDir, 'docs'));
+  writeFileSync(path.join(fixtureDir, 'docs', 'brief.txt'), 'brief', 'utf8');
+  writeFileSync(
+    path.join(fixtureDir, 'provider.json'),
+    JSON.stringify(
+      {
+        server: {
+          host: '127.0.0.1',
+          port: 8787,
+          apiKeys: [],
+        },
+        virtualModels: {
+          'oracle-docs': {
+            synthesizerAgentId: 'editor',
+            agents: [
+              {
+                id: 'editor',
+                name: 'Editor',
+                summary: 'Synthesizer',
+                systemPrompt: 'Use documents when they help.',
+                documents: [
+                  {
+                    path: 'docs/brief.txt',
+                  },
+                ],
+                engine: {
+                  provider: 'http://example.test',
+                  model: 'stub-model',
+                  timeoutMs: 1000,
+                },
+              },
+            ],
+          },
+        },
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+
+  assert.throws(
+    () => loadConfig(path.join(fixtureDir, 'provider.json')),
+    /contextWindow/
+  );
+});
+
+test('provider virtual models must declare synthesizerAgentId', () => {
+  const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'council-openai-provider-'));
+  writeFileSync(
+    path.join(fixtureDir, 'provider.json'),
+    JSON.stringify(
+      {
+        virtualModels: {
+          'oracle-docs': {
+            agents: [
+              {
+                id: 'editor',
+                name: 'Editor',
+                summary: 'Synthesizer',
+                systemPrompt: 'Use documents when they help.',
+                engine: {
+                  provider: 'http://example.test',
+                  model: 'stub-model',
+                  contextWindow: 1024,
+                  charsPerToken: 4,
+                  timeoutMs: 1000,
+                },
+              },
+            ],
+          },
+        },
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+
+  assert.throws(
+    () => loadConfig(path.join(fixtureDir, 'provider.json')),
+    /synthesizerAgentId/
+  );
+});
+
+test("provider returns 'It's dizzy.' when fixed inputs exhaust the oracle budget", async () => {
+  const app = new CouncilOpenAIProviderApp({
+    server: {
+      host: '127.0.0.1',
+      port: 0,
+      apiKeys: [],
+    },
+    debug: {
+      enabled: true,
+      traceRetention: 10,
+    },
+    limits: {
+      requestBodyBytes: 1_000_000,
+    },
+    fallbacks: {
+      agentContextExhaustedMessage: "It's dizzy.",
+    },
+    virtualModels: {
+      'oracle-dizzy': {
+        id: 'oracle-dizzy',
+        description: 'Too much fixed input',
+        synthesizerAgentId: 'editor',
+        runtime: {
+          maxRounds: 1,
+          maxAgentReplies: 1,
+        },
+        agents: [
+          {
+            id: 'editor',
+            name: 'Editor',
+            summary: 'Synthesizer',
+            systemPrompt: 'system '.repeat(40),
+            engine: {
+              provider: 'http://example.test',
+              model: 'stub-model',
+              contextWindow: 64,
+              charsPerToken: 1,
+              timeoutMs: 1000,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  app.modelRuntimes.get('oracle-dizzy').engines[
+    'oracle-dizzy:editor'
+  ].sendRequest = async () => {
+    throw new Error('request should not be called');
+  };
+
+  const response = await app.handleChatCompletions({
+    model: 'oracle-dizzy',
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  });
+
+  assert.equal(response.choices[0].finish_reason, 'stop');
+  assert.equal(response.choices[0].message.content, "It's dizzy.");
+  assert.equal(
+    app.recentTraces[0].council.errors[0].error.code,
+    'agent_context_exhausted'
+  );
+  assert.equal(app.getDebugStatus().virtualModels[0].stats.degradedCount, 1);
 });

@@ -1,11 +1,11 @@
 # `council-of-experts` Contract
 
-This document defines the contract between the `council-of-experts` module and host applications such as `neural_storm`.
+This document defines the contract between the `council-of-experts` module and host applications.
 
 The goal is to make the boundary explicit:
 
 - `council-of-experts` owns the in-memory council runtime, operating modes, hidden/private channel, orchestration, tool decisioning, and diagnostics.
-- The host application owns persistence, event sourcing, filesystem access, recovery policy, UI, permissions, and application-specific logs such as `ideas/{uuid}/idea.log`.
+- The host application owns persistence, event sourcing, filesystem access, recovery policy, UI, permissions, and any application-specific logs or event stores.
 
 This contract is intended for two audiences:
 
@@ -57,8 +57,6 @@ The host application owns:
 - access control over hidden/private council data
 - actual execution of tools, if tools are enabled
 - UI and developer diagnostics surfaces
-
-For `neural_storm`, this means `idea.log` remains the source of truth. `council-of-experts` never touches it directly.
 
 ## 3. Core model
 
@@ -161,13 +159,50 @@ export interface ToolDefinition {
 
 export type ToolRef = string | ToolDefinition;
 
+export interface PromptMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  name?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
+  tool_call_id?: string;
+}
+
+export interface PromptSummaryPolicy {
+  maxMessagesPerGroup?: number;
+  minGroupSnippetChars?: number;
+  minMessageSnippetChars?: number;
+  shrinkTargetRatio?: number;
+}
+
+export interface CouncilPromptConfig {
+  councilModeSystemAddendum?: string;
+  oracleModeSystemAddendum?: string;
+  councilSynthesisTemplate?: string;
+  oracleSynthesisTemplate?: string;
+}
+
+export interface ResolvedCouncilPromptConfig {
+  councilModeSystemAddendum: string;
+  oracleModeSystemAddendum: string;
+  councilSynthesisTemplate: string;
+  oracleSynthesisTemplate: string;
+}
+
 export interface EngineSpec {
   id: string;
   provider?: string;
   model: string;
   contextWindow?: number;
   charsPerToken?: number;
-  responseReserveTokens?: number;
+  promptBudgetRatio?: number;
+  promptSummaryPolicy?: PromptSummaryPolicy;
   settings?: Record<string, unknown>;
 }
 
@@ -195,6 +230,7 @@ export interface ChatEvent {
     name?: string;
   };
   content: string;
+  promptMessages?: PromptMessage[];
   timestamp?: string | number | Date;
   metadata?: Record<string, unknown>;
 }
@@ -244,6 +280,7 @@ export interface EngineInput {
   mode: CouncilMode;
   event: ChatEvent;
   history: CouncilMessage[];
+  promptConfig?: ResolvedCouncilPromptConfig;
   tools?: ToolDefinition[];
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
@@ -265,22 +302,28 @@ export interface CouncilModuleConfig {
   engines: Record<string, EngineAdapter>;
   toolHost?: ToolHost;
   runtime?: Partial<CouncilRuntimeConfig>;
+  prompts?: Partial<CouncilPromptConfig>;
 }
 
 export interface CouncilRuntimeConfig {
   initialMode: CouncilMode;
   maxRounds: number;
   maxAgentReplies?: number;
+  agentSelectionStrategy: 'all_in_order';
+  oracleSpeakerStrategy: 'first_active' | 'by_id';
+  oracleSpeakerAgentId?: string;
 }
 
 export interface CouncilModuleResolvedConfig {
   runtime: CouncilRuntimeConfig;
+  prompts: ResolvedCouncilPromptConfig;
 }
 
 export interface CouncilInstanceResolvedConfig {
   councilId: string;
   initialMode: CouncilMode;
   runtime: CouncilRuntimeConfig;
+  prompts: ResolvedCouncilPromptConfig;
   metadata?: Record<string, unknown>;
 }
 
@@ -289,6 +332,7 @@ export interface TurnOptions {
   maxRounds?: number;
   maxAgentReplies?: number;
   emitPublicOracle?: boolean;
+  oracleSpeakerAgentId?: string;
   trace?: boolean;
 }
 
@@ -541,11 +585,13 @@ If the host wants private messages to survive reboot, it must persist the `messa
 
 ### 8.5a `getConfig()`
 
-`getConfig()` returns a stable snapshot of the resolved runtime configuration.
+`getConfig()` returns a stable snapshot of the resolved runtime configuration and built-in prompt templates.
 
-For `CouncilModule`, it exposes module-level defaults such as `initialMode`, `maxRounds`, and `maxAgentReplies`.
+For `CouncilModule`, it exposes module-level defaults such as `initialMode`, `maxRounds`, `maxAgentReplies`, `agentSelectionStrategy`, `oracleSpeakerStrategy`, `oracleSpeakerAgentId`, and the resolved built-in prompt templates.
 
-For `Council`, it exposes the council id, the effective initial mode used when the council was opened, and the same resolved runtime defaults.
+For `Council`, it exposes the council id, the effective initial mode used when the council was opened, and the same resolved runtime defaults and prompt templates.
+
+For the built-in OpenAI adapter, prompt-packing policy is not part of `getConfig()`. It remains agent-level engine configuration through `EngineSpec.promptBudgetRatio` and `EngineSpec.promptSummaryPolicy`, and the effective values are exposed per call under `EngineOutput.metadata.tokenEstimate.promptPack`.
 
 ### 8.6 `getStatus()`
 
@@ -628,13 +674,22 @@ Every tool call that is intended to survive reboot should be represented in the 
 - The council executes those calls through `ToolHost`, emitting `tool.called` / `tool.result` records (and runtime events).
 - The council then calls the engine again with `EngineInput.toolCalls` + `EngineInput.toolResults` populated for the current turn.
 - Tool calls are only executed if the tool name appears in `agent.tools`. Otherwise a failed `ToolResult` is returned.
+- `createCouncilModule({ prompts })` resolves the built-in council/oracle workflow prompts once and passes them to the built-in adapter as `EngineInput.promptConfig`.
+- For the built-in OpenAI adapter, prompt-packing policy is explicit through `EngineSpec.promptBudgetRatio` and `EngineSpec.promptSummaryPolicy`. If omitted, the exported defaults are used.
+- For the built-in OpenAI adapter, `ChatEvent.promptMessages` can carry structured prior chat history. That history is packed with the same budgeting and summary policy as native council history instead of being flattened into a single transcript string.
 - `TurnOptions.maxRounds` limits tool-call round trips per agent. If omitted, the module runtime default is used; the built-in default is `3`.
+
+For oracle mode, public-speaker selection is also explicit:
+
+- `CouncilRuntimeConfig.oracleSpeakerStrategy = 'first_active'` uses the first active agent in configured order
+- `CouncilRuntimeConfig.oracleSpeakerStrategy = 'by_id'` uses `CouncilRuntimeConfig.oracleSpeakerAgentId`
+- `TurnOptions.oracleSpeakerAgentId` overrides the runtime choice for one turn
 
 Tool definitions (name/description/parameters) can be provided in `agent.tools` as `ToolDefinition` entries. The council passes the normalized definitions to the engine in `EngineInput.tools`.
 
 ## 11. Hidden/private channel access
 
-A host application such as `neural_storm` may inspect the hidden/private channel.
+A host application may inspect the hidden/private channel.
 
 That is a supported use case.
 
@@ -650,12 +705,12 @@ Access control over private messages is not the responsibility of `council-of-ex
 
 ## 12. Recommended host integration pattern
 
-For a host using a single append-only text log per idea, the recommended pattern is:
+For a host using a single append-only log per council entity, the recommended pattern is:
 
 ### 12.1 Boot
 
-1. create one in-memory council per idea by calling `openCouncil({ councilId: ideaId, ... })`
-2. read the relevant `idea.log`
+1. create one in-memory council per entity by calling `openCouncil({ councilId: entityId, ... })`
+2. read the relevant host log or event stream
 3. transform the relevant durable events into `CouncilReplayEntry[]`
 4. call `council.replay(...)`
 

@@ -33,7 +33,7 @@ See [packages/openai-provider/README.md](./packages/openai-provider/README.md) f
 
 ## Architecture
 
-See **[docs/council-of-experts-contract.md](./docs/council-of-experts-contract.md)** for the complete specification.
+See **[docs/CONTRACT.md](./docs/CONTRACT.md)** for the complete specification.
 
 ### Key Concepts
 
@@ -78,11 +78,9 @@ const agents: AgentDefinition[] = [
       model: 'your-model-name',
       contextWindow: 8192,
       charsPerToken: 4,
-      responseReserveTokens: 1024
     },
     summary: 'Data analysis expert',
     systemPrompt: 'You are an analytical expert...',
-    metadata: { icon: '📊' }
   }
 ];
 
@@ -100,12 +98,16 @@ const toolHost: ToolHost = {
 // 3. Create council module
 const councilModule = createCouncilModule({
   agents,
-  engines: { 'local': new OpenAIChatCompletionsEngine() },
+  engines: { 'local': new OpenAIChatCompletionsEngine(60000) },
   toolHost,
   runtime: {
     initialMode: 'open',
-    maxRounds: 3
-  }
+    maxRounds: 3,
+  },
+  prompts: {
+    oracleSynthesisTemplate:
+      'You are the Oracle.\n\nPrivate deliberation:\n{{privateThoughts}}\n\nRespond with one unified answer.',
+  },
 });
 
 // 4. Open council and post events
@@ -195,144 +197,30 @@ for await (const event of council.stream(chatEvent)) {
 }
 ```
 
-## Tool Calling
+## OpenAI Adapter
 
-Engine adapters can request tools by returning `EngineOutput.toolCalls`. The council executes those calls through `ToolHost`, emits `tool.called` / `tool.result` records (and stream events), then calls the engine again with `EngineInput.toolCalls` + `EngineInput.toolResults` for the current turn.
+For OpenAI-compatible `/v1/chat/completions` servers, the core package exports `OpenAIChatCompletionsEngine(timeoutMs)`.
 
-For OpenAI-compatible `/v1/chat/completions` servers, the core package also exports `OpenAIChatCompletionsEngine`.
+The built-in adapter requires `engine.contextWindow` and `engine.charsPerToken`. It can also take `engine.promptBudgetRatio` and `engine.promptSummaryPolicy` to make prompt-packing policy explicit.
 
-When `engine.charsPerToken` is configured, `OpenAIChatCompletionsEngine` also attaches approximate prompt/completion token estimates to `EngineOutput.metadata.tokenEstimate`.
+If you need to drive that adapter from external chat history instead of council history, `ChatEvent.promptMessages` can carry structured prior chat messages.
 
-When `engine.contextWindow`, `engine.charsPerToken`, and optionally `engine.responseReserveTokens` are configured, the adapter packs prompts per agent: fixed sections stay raw, older history is summarized before newer raw history is dropped, and the pack trace is exposed under `metadata.tokenEstimate.promptPack`. There is no fixed message-count clipping.
+If uncontrolled fixed inputs such as system prompts, tool schemas, or raw tool continuations exceed the configured prompt budget, the engine call is skipped and the turn records `agent_context_exhausted`.
 
-Tools are only executed if the tool name appears in `agent.tools`. You can provide richer tool definitions (name/description/parameters) as `ToolDefinition` entries in `agent.tools`, which are passed to the engine as `EngineInput.tools`.
+The built-in workflow prompts are also explicit. `createCouncilModule({ prompts })` can override the default council/oracle synthesis templates and the built-in `council` / `oracle` mode system addenda.
 
-`TurnOptions.maxRounds` limits tool-call round trips per agent. The module-level default comes from `createCouncilModule({ runtime: { maxRounds } })`, and defaults to `3`.
+## More Docs
 
-Non-stream execution failures are surfaced through `TurnResult.errors` and durable `error` records.
+- [docs/API.md](./docs/API.md) for the practical TypeScript API and integration examples
+- [docs/CONTRACT.md](./docs/CONTRACT.md) for the normative contract, replay semantics, and stability guarantees
+- [packages/cli/README.md](./packages/cli/README.md) for the demo CLI
+- [packages/openai-provider/README.md](./packages/openai-provider/README.md) for the OpenAI-compatible provider app
 
-## Inspecting Private Channel
-
-```typescript
-// Get all messages (public and private)
-const allMessages = await council.getMessages({ visibility: 'all' });
-
-// Get only private deliberation
-const privateMessages = await council.getMessages({ visibility: 'private' });
-
-// Returned arrays/messages are detached snapshots.
-
-// Get resolved runtime config
-const config = council.getConfig();
-
-// Get diagnostic snapshot (unstable across versions)
-const status = await council.getStatus();
-console.log(status);
-```
-
-## API Reference
-
-### createCouncilModule(config)
-
-Creates a council module.
-
-**Config:**
-- `agents: AgentDefinition[]` - Agent definitions
-- `engines: Record<string, EngineAdapter>` - Engine implementations
-- `toolHost?: ToolHost` - Optional tool executor
-- `runtime?: Partial<CouncilRuntimeConfig>` - Optional runtime defaults for `initialMode`, `maxRounds`, and `maxAgentReplies`
-
-**Returns:** `CouncilModule`
-
-### CouncilModule
-
-- `openCouncil(input)` - Create in-memory council instance
-- `listAgents()` - Get all agent definitions
-- `getConfig()` - Get resolved module runtime config
-
-### Council
-
-- `getMode()` - Get current mode
-- `getConfig()` - Get resolved council instance config
-- `replay(entries)` - Replay persisted records (pure state reconstruction)
-- `post(event, options?)` - Process turn, returns `TurnResult`
-- `stream(event, options?)` - Stream turn execution events
-- `getMessages(options?)` - Get message history
-- `getStatus()` - Get diagnostic snapshot (unstable)
-- `dispose()` - Release in-memory resources
-
-### TurnResult
-
-```typescript
-interface TurnResult {
-  turnId: string;
-  mode: CouncilMode;
-  nextMode?: CouncilMode;
-  publicMessages: CouncilMessage[];
-  privateMessages: CouncilMessage[];
-  records: CouncilRecord[];  // PERSIST THESE
-  errors: TurnError[];
-}
-```
-
-## Example Application
-
-The runnable example is the CLI in [packages/cli/README.md](./packages/cli/README.md).
-
-For the validated local-provider setup:
+The runnable example is the CLI in [packages/cli/README.md](./packages/cli/README.md). For the validated local-provider setup:
 
 ```bash
 npm install
 npm run demo:local-cli
-```
-
-For CLI-specific configuration examples, see:
-
-- [packages/cli/config.example.json](./packages/cli/config.example.json)
-- [packages/cli/config.local-provider.example.json](./packages/cli/config.local-provider.example.json)
-
-The core library itself does not require a JSON config file format.
-
-## Contract Stability
-
-**Stable (replayable across versions):**
-- TypeScript API
-- `CouncilRecord` types
-- `CouncilReplayEntry` types
-- Replay semantics
-
-**Unstable (may change):**
-- `getStatus()` payload shape
-- Internal orchestration logic
-- Runtime event details beyond documented meaning
-
-## Project Structure
-
-```
-council-of-experts/
-├── docs/
-│   └── council-of-experts-contract.md  # Complete specification
-├── packages/
-│   ├── core/                           # Main library
-│   │   ├── src/
-│   │   │   ├── config.ts               # Runtime default resolution
-│   │   │   ├── types.ts                # Contract types
-│   │   │   ├── OpenAIChatCompletionsEngine.ts
-│   │   │   ├── CouncilImpl.ts          # Council implementation
-│   │   │   ├── CouncilModule.ts        # Factory
-│   │   │   ├── utils.ts
-│   │   │   └── workflows/              # Mode executors
-│   │   └── dist/
-│   ├── cli/                            # Example CLI application
-│   │   ├── src/
-│   │   │   ├── index.ts
-│   │   │   ├── tools.ts                # Built-in CLI tool host
-│   │   │   ├── session.ts
-│   │   │   ├── chat.ts
-│   │   │   └── config.ts
-│   │   ├── config.example.json
-│   │   └── config.local-provider.example.json
-│   └── openai-provider/                # OpenAI-compatible provider app
 ```
 
 ## Development
@@ -351,18 +239,6 @@ npm test
 npm run demo:local-cli
 ```
 
-## Use Cases
-
-- **Multi-agent deliberation** - Experts privately discuss before public response
-- **Oracle synthesis** - Multiple perspectives unified into single voice
-- **Event-sourced AI** - Full audit trail of agent activity
-- **Host-controlled persistence** - Integrate with your storage/event system
-- **Mode switching** - Adapt orchestration strategy per turn
-
 ## License
 
 MIT
-
-## Contributing
-
-See [docs/council-of-experts-contract.md](./docs/council-of-experts-contract.md) for the complete contract specification.

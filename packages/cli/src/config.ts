@@ -6,6 +6,10 @@ import path from 'path';
 import {
   OpenAIChatCompletionsEngine,
   type AgentDefinition,
+  type CouncilPromptConfig,
+  type ResolvedCouncilPromptConfig,
+  type PromptSummaryPolicy,
+  resolveCouncilPromptConfig,
   resolveCouncilRuntimeConfig,
   type CouncilRuntimeConfig,
   type EngineAdapter,
@@ -18,15 +22,16 @@ import { getCLIToolDefinition } from './tools.js';
 export interface CLIAgentEngineConfig {
   provider: string;
   model: string;
-  contextWindow?: number;
-  charsPerToken?: number;
-  responseReserveTokens?: number;
+  contextWindow: number;
+  charsPerToken: number;
+  promptBudgetRatio?: number;
+  promptSummaryPolicy?: PromptSummaryPolicy;
   settings?: {
     api_key?: string;
     temperature?: number;
     [key: string]: unknown;
   };
-  timeoutMs?: number;
+  timeoutMs: number;
 }
 
 export interface CLIAgentConfig {
@@ -44,12 +49,14 @@ export interface CLIConfig {
   agents: CLIAgentConfig[];
   workspaceRoot?: string;
   runtime?: Partial<CouncilRuntimeConfig>;
+  prompts?: Partial<CouncilPromptConfig>;
 }
 
 export interface ResolvedCLIConfig {
   agents: CLIAgentConfig[];
   workspaceRoot: string;
   runtime: CouncilRuntimeConfig;
+  prompts: ResolvedCouncilPromptConfig;
 }
 
 function assertNonEmptyString(value: unknown, field: string): string {
@@ -68,6 +75,22 @@ function assertNonNegativeInteger(value: unknown, field: string): number {
   throw new Error(`Invalid ${field}: expected a non-negative integer`);
 }
 
+function assertPositiveInteger(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected a positive integer`);
+}
+
+function assertContextWindow(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 1) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected an integer greater than 1`);
+}
+
 function assertPositiveNumber(value: unknown, field: string): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return value;
@@ -76,11 +99,79 @@ function assertPositiveNumber(value: unknown, field: string): number {
   throw new Error(`Invalid ${field}: expected a positive number`);
 }
 
+function assertRatio(value: unknown, field: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 1) {
+    return value;
+  }
+
+  throw new Error(`Invalid ${field}: expected a number greater than 0 and less than 1`);
+}
+
+function validatePromptSummaryPolicy(
+  value: PromptSummaryPolicy | undefined,
+  field: string
+): PromptSummaryPolicy | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!value || typeof value !== 'object') {
+    throw new Error(`Invalid ${field}: expected an object`);
+  }
+
+  return {
+    maxMessagesPerGroup:
+      value.maxMessagesPerGroup === undefined
+        ? undefined
+        : assertPositiveInteger(
+            value.maxMessagesPerGroup,
+            `${field}.maxMessagesPerGroup`
+          ),
+    minGroupSnippetChars:
+      value.minGroupSnippetChars === undefined
+        ? undefined
+        : assertPositiveInteger(
+            value.minGroupSnippetChars,
+            `${field}.minGroupSnippetChars`
+          ),
+    minMessageSnippetChars:
+      value.minMessageSnippetChars === undefined
+        ? undefined
+        : assertPositiveInteger(
+            value.minMessageSnippetChars,
+            `${field}.minMessageSnippetChars`
+          ),
+    shrinkTargetRatio:
+      value.shrinkTargetRatio === undefined
+        ? undefined
+        : assertRatio(value.shrinkTargetRatio, `${field}.shrinkTargetRatio`),
+  };
+}
+
 function validateAgent(
   agent: CLIAgentConfig,
   index: number
 ): CLIAgentConfig {
   const prefix = `agents[${index}]`;
+  const contextWindow = assertContextWindow(
+    agent.engine?.contextWindow,
+    `${prefix}.engine.contextWindow`
+  );
+  const charsPerToken = assertPositiveNumber(
+    agent.engine?.charsPerToken,
+    `${prefix}.engine.charsPerToken`
+  );
+  const promptBudgetRatio =
+    agent.engine?.promptBudgetRatio === undefined
+      ? undefined
+      : assertRatio(
+          agent.engine.promptBudgetRatio,
+          `${prefix}.engine.promptBudgetRatio`
+        );
+  const promptSummaryPolicy = validatePromptSummaryPolicy(
+    agent.engine?.promptSummaryPolicy,
+    `${prefix}.engine.promptSummaryPolicy`
+  );
 
   return {
     id: assertNonEmptyString(agent.id, `${prefix}.id`),
@@ -99,35 +190,15 @@ function validateAgent(
         `${prefix}.engine.provider`
       ),
       model: assertNonEmptyString(agent.engine?.model, `${prefix}.engine.model`),
-      contextWindow:
-        agent.engine?.contextWindow === undefined
-          ? undefined
-          : assertNonNegativeInteger(
-              agent.engine.contextWindow,
-              `${prefix}.engine.contextWindow`
-            ),
-      charsPerToken:
-        agent.engine?.charsPerToken === undefined
-          ? undefined
-          : assertPositiveNumber(
-              agent.engine.charsPerToken,
-              `${prefix}.engine.charsPerToken`
-            ),
-      responseReserveTokens:
-        agent.engine?.responseReserveTokens === undefined
-          ? undefined
-          : assertNonNegativeInteger(
-              agent.engine.responseReserveTokens,
-              `${prefix}.engine.responseReserveTokens`
-            ),
+      contextWindow,
+      charsPerToken,
+      promptBudgetRatio,
+      promptSummaryPolicy,
       settings: agent.engine?.settings,
-      timeoutMs:
-        agent.engine?.timeoutMs === undefined
-          ? undefined
-          : assertNonNegativeInteger(
-              agent.engine.timeoutMs,
-              `${prefix}.engine.timeoutMs`
-            ),
+      timeoutMs: assertPositiveInteger(
+        agent.engine?.timeoutMs,
+        `${prefix}.engine.timeoutMs`
+      ),
     },
   };
 }
@@ -159,6 +230,7 @@ export function loadConfig(configPath: string): ResolvedCLIConfig {
         config.workspaceRoot || '.'
       ),
       runtime: resolveCouncilRuntimeConfig(config.runtime),
+      prompts: resolveCouncilPromptConfig(config.prompts),
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -187,7 +259,8 @@ export function buildCouncilSetup(config: ResolvedCLIConfig): {
       model: agent.engine.model,
       contextWindow: agent.engine.contextWindow,
       charsPerToken: agent.engine.charsPerToken,
-      responseReserveTokens: agent.engine.responseReserveTokens,
+      promptBudgetRatio: agent.engine.promptBudgetRatio,
+      promptSummaryPolicy: agent.engine.promptSummaryPolicy,
       settings: agent.engine.settings,
     };
 
@@ -204,9 +277,7 @@ export function buildCouncilSetup(config: ResolvedCLIConfig): {
       },
     });
 
-    engines[engineId] = new OpenAIChatCompletionsEngine(
-      agent.engine.timeoutMs ?? 60000
-    );
+    engines[engineId] = new OpenAIChatCompletionsEngine(agent.engine.timeoutMs);
   }
 
   return { agents, engines };

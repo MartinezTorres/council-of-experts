@@ -40,6 +40,7 @@ async function main() {
     engines,
     toolHost,
     runtime: config.runtime,
+    prompts: config.prompts,
   });
 
   console.log(`\nInitialized ${agentDefinitions.length} agents`);

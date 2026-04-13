@@ -5,6 +5,7 @@ import {
   createErrorEvent,
   createMessageEmittedEvent,
   createMessageRecord,
+  toWorkflowCouncilError,
   ExecuteWorkflowInput,
   StreamWorkflowInput,
   WorkflowDependencies,
@@ -47,12 +48,12 @@ export async function executeOpenWorkflow(
           input.turnId,
           input.records,
           input.errors,
-          {
+          toWorkflowCouncilError(error, {
             code: 'agent_execution_failed',
             message: `Agent ${agent.id} failed in open mode: ${
               error instanceof Error ? error.message : String(error)
             }`,
-          },
+          }),
           agent.id
         );
       }
@@ -90,10 +91,15 @@ export async function* streamOpenWorkflow(
         yield createMessageEmittedEvent(input.councilId, input.turnId, message);
       }
     } catch (error) {
-      yield createErrorEvent(input.councilId, input.turnId, agent.id, {
-        code: 'agent_execution_failed',
-        message: error instanceof Error ? error.message : String(error),
-      });
+      yield createErrorEvent(
+        input.councilId,
+        input.turnId,
+        agent.id,
+        toWorkflowCouncilError(error, {
+          code: 'agent_execution_failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      );
     }
 
     yield createAgentFinishedEvent(input.councilId, input.turnId, agent.id);

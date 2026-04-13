@@ -1,6 +1,6 @@
 # API Reference
 
-**For the complete API specification, see [council-of-experts-contract.md](./council-of-experts-contract.md).**
+**For the complete API specification, see [CONTRACT.md](./CONTRACT.md).**
 
 This document provides a quick reference for the most commonly used APIs.
 
@@ -19,7 +19,13 @@ const councilModule = createCouncilModule({
   toolHost: optionalToolHost,
   runtime: {
     initialMode: 'open',
-    maxRounds: 3
+    maxRounds: 3,
+    agentSelectionStrategy: 'all_in_order',
+    oracleSpeakerStrategy: 'first_active'
+  },
+  prompts: {
+    oracleSynthesisTemplate:
+      'You are the Oracle.\\n\\nPrivate deliberation:\\n{{privateThoughts}}\\n\\nRespond with one unified answer.'
   }
 });
 ```
@@ -99,6 +105,20 @@ interface ToolDefinition {
 
 type ToolRef = string | ToolDefinition;
 
+interface CouncilPromptConfig {
+  councilModeSystemAddendum?: string;
+  oracleModeSystemAddendum?: string;
+  councilSynthesisTemplate?: string;
+  oracleSynthesisTemplate?: string;
+}
+
+interface ResolvedCouncilPromptConfig {
+  councilModeSystemAddendum: string;
+  oracleModeSystemAddendum: string;
+  councilSynthesisTemplate: string;
+  oracleSynthesisTemplate: string;
+}
+
 // Engine specification
 interface EngineSpec {
   id: string;
@@ -106,7 +126,13 @@ interface EngineSpec {
   model: string;
   contextWindow?: number;
   charsPerToken?: number;
-  responseReserveTokens?: number;
+  promptBudgetRatio?: number;
+  promptSummaryPolicy?: {
+    maxMessagesPerGroup?: number;
+    minGroupSnippetChars?: number;
+    minMessageSnippetChars?: number;
+    shrinkTargetRatio?: number;
+  };
   settings?: Record<string, unknown>;
 }
 
@@ -119,6 +145,20 @@ interface ChatEvent {
     name?: string;
   };
   content: string;
+  promptMessages?: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string;
+    name?: string;
+    tool_calls?: Array<{
+      id: string;
+      type: 'function';
+      function: {
+        name: string;
+        arguments: string;
+      };
+    }>;
+    tool_call_id?: string;
+  }>;
   timestamp?: string | number | Date;
   metadata?: Record<string, unknown>;
 }
@@ -154,6 +194,7 @@ interface EngineInput {
   mode: CouncilMode;
   event: ChatEvent;
   history: CouncilMessage[];
+  promptConfig?: ResolvedCouncilPromptConfig;
   tools?: ToolDefinition[];
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
@@ -166,7 +207,7 @@ interface EngineOutput {
 }
 ```
 
-For OpenAI-compatible `/v1/chat/completions` servers, you can use the built-in `OpenAIChatCompletionsEngine` exported by `council-of-experts`.
+For OpenAI-compatible `/v1/chat/completions` servers, you can use the built-in `OpenAIChatCompletionsEngine(timeoutMs)` exported by `council-of-experts`.
 
 ### ToolHost (Host Implementation)
 
@@ -213,6 +254,9 @@ interface TurnError {
 - The council executes them via `ToolHost` and emits `tool.called` / `tool.result` records and runtime events.
 - The engine is called again with `EngineInput.toolCalls` + `EngineInput.toolResults` for the current turn.
 - Tool calls are executed only if the tool name is present in `agent.tools`.
+- For the built-in OpenAI adapter, `engine.promptBudgetRatio` and `engine.promptSummaryPolicy` make prompt-packing policy explicit; the exported `DEFAULT_PROMPT_BUDGET_RATIO` and `DEFAULT_PROMPT_SUMMARY_POLICY` hold the defaults.
+- `createCouncilModule({ prompts })` makes the built-in council/oracle workflow prompts explicit; the module resolves those templates once and passes them to the runtime and built-in adapter as `EngineInput.promptConfig`.
+- `ChatEvent.promptMessages` is optional structured prior chat history for the built-in OpenAI adapter; it uses the same packer and summary policy instead of flattening that history into a single transcript string.
 - `TurnOptions.maxRounds` limits tool-call round trips per agent. The module-level default comes from `createCouncilModule({ runtime: { maxRounds } })`, and defaults to `3`.
 - Non-stream execution failures are surfaced in `TurnResult.errors` and durable `error` records.
 
@@ -251,6 +295,8 @@ const privateOnly = await council.post(event, {
 // privateOnly.privateMessages - hidden agent deliberation
 // privateOnly.publicMessages - empty
 ```
+
+`runtime.oracleSpeakerStrategy` makes the public oracle speaker selection explicit. Use `'first_active'` to synthesize with the first active agent, or `'by_id'` plus `runtime.oracleSpeakerAgentId` to pin synthesis to a specific agent. `TurnOptions.oracleSpeakerAgentId` can override that choice per turn.
 
 ## Replay Model
 
@@ -320,15 +366,7 @@ const id = generateId(); // Unique ID
 const ts = normalizeTimestamp(Date.now()); // ISO string
 ```
 
-## Complete Type Definitions
+## Further Reading
 
-See [../packages/core/src/types.ts](../packages/core/src/types.ts) for complete TypeScript definitions.
-
-## Complete Specification
-
-See [council-of-experts-contract.md](./council-of-experts-contract.md) for the complete contract specification, including:
-- Durability model
-- Replay semantics
-- Stability guarantees
-- Integration patterns
-- Full type reference
+- [../packages/core/src/types.ts](../packages/core/src/types.ts) for the complete TypeScript definitions
+- [CONTRACT.md](./CONTRACT.md) for the normative contract, replay semantics, and stability guarantees

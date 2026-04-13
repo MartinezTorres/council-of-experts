@@ -1,3 +1,12 @@
+import { AgentContextExhaustedError } from './errors.js';
+import { buildModeSystemPrompt } from './prompts.js';
+export const DEFAULT_PROMPT_BUDGET_RATIO = 0.5;
+export const DEFAULT_PROMPT_SUMMARY_POLICY = {
+    maxMessagesPerGroup: 3,
+    minGroupSnippetChars: 24,
+    minMessageSnippetChars: 18,
+    shrinkTargetRatio: 0.95,
+};
 function normalizeWhitespace(value) {
     return value.replace(/\s+/g, ' ').trim();
 }
@@ -21,22 +30,49 @@ export function estimateTokensFromText(text, charsPerToken) {
     return Math.max(1, Math.ceil(text.length / charsPerToken));
 }
 function estimateValueTokens(value, charsPerToken) {
-    if (charsPerToken === undefined) {
-        return undefined;
-    }
     return estimateTokensFromText(JSON.stringify(value), charsPerToken);
 }
 function estimateMessagesTokens(messages, charsPerToken) {
     return estimateValueTokens(messages, charsPerToken);
 }
-function buildModeSystemPrompt(systemPrompt, mode) {
-    if (mode === 'council') {
-        return `${systemPrompt}\n\nYou are in council mode. Deliberate carefully with other agents.`;
+function splitContextWindow(contextWindow, promptBudgetRatio) {
+    // Prompt construction gets an explicit ratio of the advertised window; the
+    // remainder is intentionally left for completion tokens and tool round-trips.
+    const promptBudgetTokens = Math.max(1, Math.min(contextWindow - 1, Math.floor(contextWindow * promptBudgetRatio)));
+    return {
+        promptBudgetTokens,
+        reservedForResponseAndToolsTokens: Math.max(0, contextWindow - promptBudgetTokens),
+    };
+}
+function resolvePromptSummaryPolicy(input) {
+    return {
+        maxMessagesPerGroup: input?.maxMessagesPerGroup ??
+            DEFAULT_PROMPT_SUMMARY_POLICY.maxMessagesPerGroup,
+        minGroupSnippetChars: input?.minGroupSnippetChars ??
+            DEFAULT_PROMPT_SUMMARY_POLICY.minGroupSnippetChars,
+        minMessageSnippetChars: input?.minMessageSnippetChars ??
+            DEFAULT_PROMPT_SUMMARY_POLICY.minMessageSnippetChars,
+        shrinkTargetRatio: input?.shrinkTargetRatio ??
+            DEFAULT_PROMPT_SUMMARY_POLICY.shrinkTargetRatio,
+    };
+}
+function formatPromptMessageContent(message) {
+    const fragments = [];
+    if (message.role === 'tool' && message.tool_call_id) {
+        fragments.push(`[tool_call_id=${message.tool_call_id}]`);
     }
-    if (mode === 'oracle') {
-        return `${systemPrompt}\n\nYou are in oracle mode. You are part of a unified council voice.`;
+    if (message.content.trim().length > 0) {
+        fragments.push(message.content);
     }
-    return systemPrompt;
+    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        for (const call of message.tool_calls) {
+            fragments.push(`[tool call ${call.id}] ${call.function.name}(${call.function.arguments})`);
+        }
+    }
+    if (fragments.length === 0) {
+        return `(empty ${message.role} message)`;
+    }
+    return fragments.join('\n');
 }
 function toHistoryChatMessage(message) {
     return {
@@ -44,6 +80,38 @@ function toHistoryChatMessage(message) {
             ? 'assistant'
             : 'user',
         content: `${message.author.name}: ${message.content}`,
+    };
+}
+function toHistorySourceMessage(message) {
+    return {
+        rawMessage: toHistoryChatMessage(message),
+        summaryLabel: message.author.name,
+        summaryKind: message.visibility,
+        summaryText: message.content,
+        groupKey: `${message.author.name}:${message.visibility}`,
+    };
+}
+function toPromptHistorySourceMessage(message) {
+    const roleLabel = message.name && message.name.trim().length > 0
+        ? message.name
+        : message.role === 'system'
+            ? 'System'
+            : message.role === 'user'
+                ? 'User'
+                : message.role === 'assistant'
+                    ? 'Assistant'
+                    : message.tool_call_id
+                        ? `Tool ${message.tool_call_id}`
+                        : 'Tool';
+    const toolCallIds = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+        ? `:${message.tool_calls.map((call) => call.id).join(',')}`
+        : '';
+    return {
+        rawMessage: message,
+        summaryLabel: roleLabel,
+        summaryKind: message.role,
+        summaryText: formatPromptMessageContent(message),
+        groupKey: `${message.role}:${message.name ?? ''}:${message.tool_call_id ?? ''}${toolCallIds}`,
     };
 }
 function buildToolContinuationMessages(input) {
@@ -93,22 +161,21 @@ function groupHistoryMessages(messages) {
     const groups = [];
     for (const message of messages) {
         const last = groups[groups.length - 1];
-        if (last &&
-            last.authorName === message.author.name &&
-            last.visibility === message.visibility) {
+        if (last && last.groupKey === message.groupKey) {
             last.messages.push(message);
             continue;
         }
         groups.push({
-            authorName: message.author.name,
-            visibility: message.visibility,
+            label: message.summaryLabel,
+            kind: message.summaryKind,
+            groupKey: message.groupKey,
             messages: [message],
         });
     }
     return groups;
 }
 function buildHistorySummaryText(input) {
-    const { messages, maxChars } = input;
+    const { messages, maxChars, summaryPolicy } = input;
     if (messages.length === 0 || maxChars <= 0) {
         return {
             text: '',
@@ -116,13 +183,18 @@ function buildHistorySummaryText(input) {
             omittedSourceMessages: messages.length,
         };
     }
-    const participantNames = Array.from(new Set(messages.map((message) => message.author.name)));
-    const publicCount = messages.filter((message) => message.visibility === 'public').length;
-    const privateCount = messages.length - publicCount;
+    const participantNames = Array.from(new Set(messages.map((message) => message.summaryLabel)));
+    const kindCounts = new Map();
+    for (const message of messages) {
+        kindCounts.set(message.summaryKind, (kindCounts.get(message.summaryKind) ?? 0) + 1);
+    }
+    const kindSummary = Array.from(kindCounts.entries())
+        .map(([kind, count]) => `${count} ${kind}`)
+        .join(', ') || 'none';
     const headerLines = [
         `Earlier conversation summary for ${messages.length} messages.`,
         `Participants: ${participantNames.join(', ') || 'none'}.`,
-        `Visibility mix: ${publicCount} public, ${privateCount} private.`,
+        `Kind mix: ${kindSummary}.`,
     ];
     let text = headerLines.join('\n');
     if (text.length >= maxChars) {
@@ -149,18 +221,19 @@ function buildHistorySummaryText(input) {
         if (availableLineChars <= 0) {
             break;
         }
-        const prefix = `- ${group.authorName} (${group.visibility}`;
+        const prefix = `- ${group.label} (${group.kind}`;
         const prefixWithCount = group.messages.length > 1
             ? `${prefix}, ${group.messages.length} msgs): `
             : `${prefix}): `;
-        const snippetBudget = Math.max(24, availableLineChars - prefixWithCount.length);
-        const perMessageBudget = Math.max(18, Math.floor(snippetBudget / Math.min(group.messages.length, 3)));
+        const snippetBudget = Math.max(summaryPolicy.minGroupSnippetChars, availableLineChars - prefixWithCount.length);
+        const perMessageBudget = Math.max(summaryPolicy.minMessageSnippetChars, Math.floor(snippetBudget /
+            Math.min(group.messages.length, summaryPolicy.maxMessagesPerGroup)));
         const snippets = group.messages
-            .slice(0, 3)
-            .map((message) => truncateText(message.content, perMessageBudget));
+            .slice(0, summaryPolicy.maxMessagesPerGroup)
+            .map((message) => truncateText(message.summaryText, perMessageBudget));
         let line = `${prefixWithCount}${snippets.join(' | ')}`;
-        if (group.messages.length > 3) {
-            line += ` (+${group.messages.length - 3} more)`;
+        if (group.messages.length > summaryPolicy.maxMessagesPerGroup) {
+            line += ` (+${group.messages.length - summaryPolicy.maxMessagesPerGroup} more)`;
         }
         line = truncateText(line, availableLineChars);
         if (line.length === 0) {
@@ -198,6 +271,7 @@ function buildHistorySummaryMessage(input) {
     const summary = buildHistorySummaryText({
         messages: input.messages,
         maxChars,
+        summaryPolicy: input.summaryPolicy,
     });
     if (!summary.text) {
         return {
@@ -209,7 +283,9 @@ function buildHistorySummaryMessage(input) {
     let content = summary.text;
     let estimatedTokens = estimateTokensFromText(content, input.charsPerToken);
     while (estimatedTokens > input.maxTokens && content.length > 0) {
-        const targetChars = Math.max(0, Math.floor(content.length * ((input.maxTokens / estimatedTokens) * 0.95)));
+        const targetChars = Math.max(0, Math.floor(content.length *
+            ((input.maxTokens / estimatedTokens) *
+                input.summaryPolicy.shrinkTargetRatio)));
         content = truncateText(content, targetChars);
         estimatedTokens = estimateTokensFromText(content, input.charsPerToken);
     }
@@ -239,49 +315,25 @@ function createSectionTrace(input) {
     };
 }
 function buildHistoryPack(input) {
-    if (input.availableTokens === undefined ||
-        input.charsPerToken === undefined) {
-        return {
-            rawMessages: input.rawHistoryMessages,
-            summaryText: undefined,
-            strategy: 'unbounded',
-            rawHistoryMessages: input.rawHistoryMessages.length,
-            summarizedHistoryMessages: 0,
-            omittedHistoryMessages: 0,
-            sections: input.rawHistoryMessages.length > 0
-                ? [
-                    createSectionTrace({
-                        id: 'history-raw',
-                        kind: 'history.raw',
-                        value: input.rawHistoryMessages,
-                        charsPerToken: input.charsPerToken,
-                        sourceMessageCount: input.history.length,
-                        packedMessageCount: input.rawHistoryMessages.length,
-                        includedMessageCount: input.history.length,
-                        omittedMessageCount: 0,
-                    }),
-                ]
-                : [],
-        };
-    }
-    const fullHistoryTokens = estimateMessagesTokens(input.rawHistoryMessages, input.charsPerToken) ?? 0;
+    const rawHistoryMessages = input.history.map((message) => message.rawMessage);
+    const fullHistoryTokens = estimateMessagesTokens(rawHistoryMessages, input.charsPerToken);
     if (fullHistoryTokens <= input.availableTokens) {
         return {
-            rawMessages: input.rawHistoryMessages,
+            rawMessages: rawHistoryMessages,
             summaryText: undefined,
             strategy: 'full_history',
-            rawHistoryMessages: input.rawHistoryMessages.length,
+            rawHistoryMessages: rawHistoryMessages.length,
             summarizedHistoryMessages: 0,
             omittedHistoryMessages: 0,
-            sections: input.rawHistoryMessages.length > 0
+            sections: rawHistoryMessages.length > 0
                 ? [
                     createSectionTrace({
                         id: 'history-raw',
                         kind: 'history.raw',
-                        value: input.rawHistoryMessages,
+                        value: rawHistoryMessages,
                         charsPerToken: input.charsPerToken,
                         sourceMessageCount: input.history.length,
-                        packedMessageCount: input.rawHistoryMessages.length,
+                        packedMessageCount: rawHistoryMessages.length,
                         includedMessageCount: input.history.length,
                         omittedMessageCount: 0,
                     }),
@@ -290,8 +342,8 @@ function buildHistoryPack(input) {
         };
     }
     for (let splitIndex = 0; splitIndex <= input.history.length; splitIndex += 1) {
-        const recentRawMessages = input.rawHistoryMessages.slice(splitIndex);
-        const recentRawTokens = estimateMessagesTokens(recentRawMessages, input.charsPerToken) ?? 0;
+        const recentRawMessages = rawHistoryMessages.slice(splitIndex);
+        const recentRawTokens = estimateMessagesTokens(recentRawMessages, input.charsPerToken);
         if (recentRawTokens > input.availableTokens) {
             continue;
         }
@@ -301,11 +353,12 @@ function buildHistoryPack(input) {
             messages: olderMessages,
             maxTokens: summaryBudgetTokens,
             charsPerToken: input.charsPerToken,
+            summaryPolicy: input.summaryPolicy,
         });
         const packedTokens = (summary.summaryText
             ? estimateTokensFromText(summary.summaryText, input.charsPerToken)
             : 0) +
-            (estimateMessagesTokens(recentRawMessages, input.charsPerToken) ?? 0);
+            estimateMessagesTokens(recentRawMessages, input.charsPerToken);
         if (packedTokens > input.availableTokens) {
             continue;
         }
@@ -353,15 +406,35 @@ function buildHistoryPack(input) {
         summaryText: undefined,
         strategy: 'fixed_only',
         rawHistoryMessages: 0,
-        summarizedHistoryMessages: input.history.length,
+        summarizedHistoryMessages: 0,
         omittedHistoryMessages: input.history.length,
         sections: [],
     };
 }
-export function packOpenAIChatMessages(input) {
-    const systemMessage = {
+function buildAdditionalSystemContextPrompt(systemMessages) {
+    if (systemMessages.length === 0) {
+        return undefined;
+    }
+    if (systemMessages.length === 1 && !systemMessages[0].name) {
+        return systemMessages[0].content;
+    }
+    const lines = ['Additional request system context:'];
+    for (const [index, message] of systemMessages.entries()) {
+        const label = message.name && message.name.trim().length > 0
+            ? `#${index + 1} (${message.name})`
+            : `#${index + 1}`;
+        lines.push(`${label} ${message.content}`.trim());
+    }
+    return lines.join('\n');
+}
+function packPreparedOpenAIChatMessages(input) {
+    const baseSystemMessage = {
         role: 'system',
-        content: buildModeSystemPrompt(input.systemPrompt, input.mode),
+        content: buildModeSystemPrompt({
+            systemPrompt: input.systemPrompt,
+            mode: input.mode,
+            prompts: input.promptConfig,
+        }),
     };
     const eventMessage = {
         role: input.event.role,
@@ -371,26 +444,33 @@ export function packOpenAIChatMessages(input) {
         toolCalls: input.toolCalls,
         toolResults: input.toolResults,
     });
-    const relevantHistory = input.mode === 'open'
-        ? input.history.filter((message) => message.visibility === 'public')
-        : input.history;
-    const rawHistoryMessages = relevantHistory.map(toHistoryChatMessage);
+    const fixedSystemMessages = input.fixedSystemMessages ?? [];
     const fixedSections = [
         createSectionTrace({
             id: 'system',
             kind: 'system',
-            value: [systemMessage],
-            charsPerToken: input.charsPerToken,
-            packedMessageCount: 1,
-        }),
-        createSectionTrace({
-            id: 'event',
-            kind: 'event',
-            value: [eventMessage],
+            value: [baseSystemMessage],
             charsPerToken: input.charsPerToken,
             packedMessageCount: 1,
         }),
     ];
+    if (fixedSystemMessages.length > 0) {
+        fixedSections.push(createSectionTrace({
+            id: 'system-context',
+            kind: 'system',
+            value: fixedSystemMessages,
+            charsPerToken: input.charsPerToken,
+            sourceMessageCount: fixedSystemMessages.length,
+            packedMessageCount: fixedSystemMessages.length,
+        }));
+    }
+    fixedSections.push(createSectionTrace({
+        id: 'event',
+        kind: 'event',
+        value: [eventMessage],
+        charsPerToken: input.charsPerToken,
+        packedMessageCount: 1,
+    }));
     if (toolContinuationMessages.length > 0) {
         fixedSections.push(createSectionTrace({
             id: 'tool-continuation',
@@ -408,22 +488,50 @@ export function packOpenAIChatMessages(input) {
             charsPerToken: input.charsPerToken,
         }));
     }
-    const responseReserveTokens = input.responseReserveTokens ?? 0;
-    const fixedTokens = fixedSections.reduce((sum, section) => sum + (section.estimatedTokens ?? 0), 0) ?? 0;
-    const availablePromptTokens = input.contextWindow === undefined || input.charsPerToken === undefined
-        ? undefined
-        : Math.max(0, input.contextWindow - responseReserveTokens - fixedTokens);
-    const historyPack = buildHistoryPack({
-        history: relevantHistory,
-        rawHistoryMessages,
-        availableTokens: availablePromptTokens,
-        charsPerToken: input.charsPerToken,
+    const promptBudgetRatio = input.promptBudgetRatio ?? DEFAULT_PROMPT_BUDGET_RATIO;
+    const promptSummaryPolicy = resolvePromptSummaryPolicy(input.promptSummaryPolicy);
+    const contextBudget = splitContextWindow(input.contextWindow, promptBudgetRatio);
+    const uncontrolledFixedSections = fixedSections.filter((section) => {
+        return (section.kind === 'system' ||
+            section.kind === 'tool.continuation' ||
+            section.kind === 'tool.schemas');
     });
+    const uncontrolledFixedTokens = uncontrolledFixedSections.reduce((sum, section) => sum + (section.estimatedTokens ?? 0), 0);
+    if (uncontrolledFixedTokens > contextBudget.promptBudgetTokens) {
+        throw new AgentContextExhaustedError('Agent fixed inputs exceed the configured prompt budget', {
+            reason: 'uncontrolled_fixed_inputs_exceed_prompt_budget',
+            promptBudgetTokens: contextBudget.promptBudgetTokens,
+            uncontrolledFixedTokens,
+            sections: uncontrolledFixedSections.map((section) => ({
+                id: section.id,
+                kind: section.kind,
+                estimatedChars: section.estimatedChars,
+                estimatedTokens: section.estimatedTokens,
+            })),
+        });
+    }
+    const fixedTokens = fixedSections.reduce((sum, section) => sum + (section.estimatedTokens ?? 0), 0);
+    if (fixedTokens > contextBudget.promptBudgetTokens) {
+        throw new Error(`Fixed prompt sections exceed prompt budget (${fixedTokens} > ${contextBudget.promptBudgetTokens} estimated tokens)`);
+    }
+    const availableHistoryTokens = Math.max(0, contextBudget.promptBudgetTokens - fixedTokens);
+    const historyPack = buildHistoryPack({
+        history: input.history,
+        availableTokens: availableHistoryTokens,
+        charsPerToken: input.charsPerToken,
+        summaryPolicy: promptSummaryPolicy,
+    });
+    const additionalSystemContext = buildAdditionalSystemContextPrompt(fixedSystemMessages);
+    const combinedSystemParts = [baseSystemMessage.content];
+    if (additionalSystemContext) {
+        combinedSystemParts.push(additionalSystemContext);
+    }
+    if (historyPack.summaryText) {
+        combinedSystemParts.push(historyPack.summaryText);
+    }
     const combinedSystemMessage = {
-        ...systemMessage,
-        content: historyPack.summaryText
-            ? `${systemMessage.content}\n\n${historyPack.summaryText}`
-            : systemMessage.content,
+        ...baseSystemMessage,
+        content: combinedSystemParts.join('\n\n'),
     };
     const messages = [
         combinedSystemMessage,
@@ -431,21 +539,70 @@ export function packOpenAIChatMessages(input) {
         eventMessage,
         ...toolContinuationMessages,
     ];
+    const toolSchemaTokens = fixedSections.find((section) => section.kind === 'tool.schemas')
+        ?.estimatedTokens ?? 0;
+    const estimatedPackedPromptTokens = estimateMessagesTokens(messages, input.charsPerToken) + toolSchemaTokens;
+    if (estimatedPackedPromptTokens > contextBudget.promptBudgetTokens) {
+        throw new Error(`Packed prompt exceeds prompt budget (${estimatedPackedPromptTokens} > ${contextBudget.promptBudgetTokens} estimated tokens)`);
+    }
     return {
         messages,
         trace: {
             strategy: historyPack.strategy,
             charsPerToken: input.charsPerToken,
             contextWindow: input.contextWindow,
-            responseReserveTokens: input.contextWindow === undefined ? undefined : responseReserveTokens,
-            availablePromptTokens,
-            estimatedPackedPromptTokens: estimateMessagesTokens(messages, input.charsPerToken),
-            historySourceMessages: relevantHistory.length,
+            promptBudgetRatio,
+            promptSummaryPolicy,
+            promptBudgetTokens: contextBudget.promptBudgetTokens,
+            reservedForResponseAndToolsTokens: contextBudget.reservedForResponseAndToolsTokens,
+            availableHistoryTokens,
+            estimatedPackedPromptTokens,
+            historySourceMessages: input.history.length,
             rawHistoryMessages: historyPack.rawHistoryMessages,
             summarizedHistoryMessages: historyPack.summarizedHistoryMessages,
             omittedHistoryMessages: historyPack.omittedHistoryMessages,
             sections: [...fixedSections, ...historyPack.sections],
         },
     };
+}
+export function packOpenAIChatMessages(input) {
+    const relevantHistory = input.mode === 'open'
+        ? input.history.filter((message) => message.visibility === 'public')
+        : input.history;
+    return packPreparedOpenAIChatMessages({
+        systemPrompt: input.systemPrompt,
+        mode: input.mode,
+        promptConfig: input.promptConfig,
+        history: relevantHistory.map(toHistorySourceMessage),
+        event: input.event,
+        toolCalls: input.toolCalls,
+        toolResults: input.toolResults,
+        toolSchemas: input.toolSchemas,
+        contextWindow: input.contextWindow,
+        charsPerToken: input.charsPerToken,
+        promptBudgetRatio: input.promptBudgetRatio,
+        promptSummaryPolicy: input.promptSummaryPolicy,
+    });
+}
+export function packOpenAIChatPromptMessages(input) {
+    const fixedSystemMessages = input.promptMessages.filter((message) => message.role === 'system');
+    const historyMessages = input.promptMessages
+        .filter((message) => message.role !== 'system')
+        .map(toPromptHistorySourceMessage);
+    return packPreparedOpenAIChatMessages({
+        systemPrompt: input.systemPrompt,
+        mode: input.mode,
+        promptConfig: input.promptConfig,
+        fixedSystemMessages,
+        history: historyMessages,
+        event: input.event,
+        toolCalls: input.toolCalls,
+        toolResults: input.toolResults,
+        toolSchemas: input.toolSchemas,
+        contextWindow: input.contextWindow,
+        charsPerToken: input.charsPerToken,
+        promptBudgetRatio: input.promptBudgetRatio,
+        promptSummaryPolicy: input.promptSummaryPolicy,
+    });
 }
 //# sourceMappingURL=OpenAIChatPromptPacker.js.map

@@ -9,8 +9,14 @@ export type {
   CouncilMode,
   ToolDefinition,
   ToolRef,
+  PromptMessage,
+  CouncilPromptConfig,
+  ResolvedCouncilPromptConfig,
   EngineSpec,
   AgentDefinition,
+  PromptSummaryPolicy,
+  EngineRequestAttemptDebug,
+  EngineRequestDebug,
   OpenCouncilInput,
   ChatEvent,
   CouncilMessage,
@@ -44,10 +50,22 @@ export {
   DEFAULT_COUNCIL_RUNTIME_CONFIG,
   resolveCouncilRuntimeConfig,
 } from './config.js';
+export {
+  DEFAULT_COUNCIL_PROMPTS,
+  resolveCouncilPromptConfig,
+} from './prompts.js';
 
 // Export factory function
 export { createCouncilModule } from './CouncilModule.js';
 export { OpenAIChatCompletionsEngine } from './OpenAIChatCompletionsEngine.js';
+export {
+  DEFAULT_PROMPT_BUDGET_RATIO,
+  DEFAULT_PROMPT_SUMMARY_POLICY,
+} from './OpenAIChatPromptPacker.js';
+export {
+  AgentContextExhaustedError,
+  isAgentContextExhaustedError,
+} from './errors.js';
 
 // Export utility functions
 export { generateId, normalizeTimestamp } from './utils.js';

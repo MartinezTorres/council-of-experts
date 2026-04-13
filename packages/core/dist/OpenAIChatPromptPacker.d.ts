@@ -1,17 +1,13 @@
-import type { CouncilMessage, CouncilMode, ToolCall, ToolResult } from './types.js';
-export interface OpenAIChatMessage {
-    role: 'system' | 'user' | 'assistant' | 'tool';
-    content: string;
-    tool_calls?: Array<{
-        id: string;
-        type: 'function';
-        function: {
-            name: string;
-            arguments: string;
-        };
-    }>;
-    tool_call_id?: string;
+import type { CouncilMessage, CouncilMode, PromptMessage, PromptSummaryPolicy, ResolvedCouncilPromptConfig, ToolCall, ToolResult } from './types.js';
+export interface ResolvedPromptSummaryPolicy {
+    maxMessagesPerGroup: number;
+    minGroupSnippetChars: number;
+    minMessageSnippetChars: number;
+    shrinkTargetRatio: number;
 }
+export declare const DEFAULT_PROMPT_BUDGET_RATIO = 0.5;
+export declare const DEFAULT_PROMPT_SUMMARY_POLICY: ResolvedPromptSummaryPolicy;
+export type OpenAIChatMessage = PromptMessage;
 export interface OpenAIContextPackSectionTrace {
     id: string;
     kind: 'system' | 'history.summary' | 'history.raw' | 'event' | 'tool.continuation' | 'tool.schemas';
@@ -23,11 +19,14 @@ export interface OpenAIContextPackSectionTrace {
     omittedMessageCount?: number;
 }
 export interface OpenAIContextPackTrace {
-    strategy: 'unbounded' | 'full_history' | 'recent_plus_summary' | 'summary_only' | 'fixed_only';
+    strategy: 'full_history' | 'recent_plus_summary' | 'summary_only' | 'fixed_only';
     charsPerToken?: number;
     contextWindow?: number;
-    responseReserveTokens?: number;
-    availablePromptTokens?: number;
+    promptBudgetRatio?: number;
+    promptSummaryPolicy?: ResolvedPromptSummaryPolicy;
+    promptBudgetTokens?: number;
+    reservedForResponseAndToolsTokens?: number;
+    availableHistoryTokens?: number;
     estimatedPackedPromptTokens?: number;
     historySourceMessages: number;
     rawHistoryMessages: number;
@@ -43,6 +42,7 @@ export declare function estimateTokensFromText(text: string, charsPerToken: numb
 export declare function packOpenAIChatMessages(input: {
     systemPrompt: string;
     mode: CouncilMode;
+    promptConfig?: ResolvedCouncilPromptConfig;
     history: CouncilMessage[];
     event: {
         role: 'assistant' | 'user';
@@ -51,8 +51,26 @@ export declare function packOpenAIChatMessages(input: {
     toolCalls?: ToolCall[];
     toolResults?: ToolResult[];
     toolSchemas?: unknown;
-    contextWindow?: number;
-    charsPerToken?: number;
-    responseReserveTokens?: number;
+    contextWindow: number;
+    charsPerToken: number;
+    promptBudgetRatio?: number;
+    promptSummaryPolicy?: PromptSummaryPolicy;
+}): OpenAIChatPromptPackResult;
+export declare function packOpenAIChatPromptMessages(input: {
+    systemPrompt: string;
+    mode: CouncilMode;
+    promptConfig?: ResolvedCouncilPromptConfig;
+    promptMessages: PromptMessage[];
+    event: {
+        role: 'assistant' | 'user';
+        content: string;
+    };
+    toolCalls?: ToolCall[];
+    toolResults?: ToolResult[];
+    toolSchemas?: unknown;
+    contextWindow: number;
+    charsPerToken: number;
+    promptBudgetRatio?: number;
+    promptSummaryPolicy?: PromptSummaryPolicy;
 }): OpenAIChatPromptPackResult;
 //# sourceMappingURL=OpenAIChatPromptPacker.d.ts.map

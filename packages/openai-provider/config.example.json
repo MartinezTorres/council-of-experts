@@ -5,14 +5,30 @@
     "apiKeys": []
   },
   "debug": {
-    "enabled": true
+    "enabled": true,
+    "traceRetention": 100
+  },
+  "limits": {
+    "requestBodyBytes": 1000000
+  },
+  "fallbacks": {
+    "agentContextExhaustedMessage": "It's dizzy."
+  },
+  "prompts": {
+    "requestInstruction": "Produce exactly the next assistant reply for the provided chat history. Do not mention hidden deliberation, councils, or internal agents."
   },
   "virtualModels": {
     "council-qwen-review": {
       "description": "Oracle-style council backed by three internal reviewers",
+      "synthesizerAgentId": "editor",
+      "councilPrompts": {
+        "oracleSynthesisTemplate": "You are the Oracle, speaking with one unified voice for the council.\n\nPrivate deliberation from council members:\n{{privateThoughts}}\n\nAnswer with one direct, technically concrete response:"
+      },
       "runtime": {
         "maxRounds": 2,
-        "maxAgentReplies": 3
+        "maxAgentReplies": 3,
+        "agentSelectionStrategy": "all_in_order",
+        "oracleSpeakerStrategy": "first_active"
       },
       "agents": [
         {
@@ -26,7 +42,7 @@
               "description": "Core API reference"
             },
             {
-              "path": "../../docs/council-of-experts-contract.md",
+              "path": "../../docs/CONTRACT.md",
               "description": "Contract and record model"
             }
           ],
@@ -35,7 +51,13 @@
             "model": "Qwen3.5-27B",
             "contextWindow": 12288,
             "charsPerToken": 4,
-            "responseReserveTokens": 1536,
+            "promptBudgetRatio": 0.55,
+            "promptSummaryPolicy": {
+              "maxMessagesPerGroup": 3,
+              "minGroupSnippetChars": 24,
+              "minMessageSnippetChars": 18,
+              "shrinkTargetRatio": 0.95
+            },
             "settings": {
               "temperature": 0
             },
@@ -52,7 +74,6 @@
             "model": "Qwen3.5-27B",
             "contextWindow": 8192,
             "charsPerToken": 4,
-            "responseReserveTokens": 1024,
             "settings": {
               "temperature": 0.1
             },
@@ -66,7 +87,7 @@
           "systemPrompt": "You review behavior critically. Respond concisely and concretely.",
           "documents": [
             {
-              "path": "../../docs/council-of-experts-contract.md",
+              "path": "../../docs/CONTRACT.md",
               "description": "Contract and record model"
             }
           ],
@@ -75,7 +96,6 @@
             "model": "Qwen3.5-27B",
             "contextWindow": 6144,
             "charsPerToken": 4,
-            "responseReserveTokens": 768,
             "settings": {
               "temperature": 0.1
             },

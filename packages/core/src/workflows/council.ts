@@ -1,4 +1,5 @@
 import { AgentDefinition } from '../types.js';
+import { buildCouncilSynthesisPrompt } from '../prompts.js';
 import {
   createAgentFinishedEvent,
   createAgentMessage,
@@ -7,21 +8,11 @@ import {
   createErrorEvent,
   createMessageEmittedEvent,
   createMessageRecord,
+  toWorkflowCouncilError,
   ExecuteWorkflowInput,
   StreamWorkflowInput,
   WorkflowDependencies,
 } from './shared.js';
-
-function buildCouncilSynthesisPrompt(
-  privateThoughts: Array<{ agent: AgentDefinition; content: string }>
-): string {
-  return `Based on the council's private deliberation, formulate your public response.
-
-Private thoughts from council:
-${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
-
-Your public response (or say nothing if you have nothing to add):`;
-}
 
 export async function executeCouncilWorkflow(
   input: ExecuteWorkflowInput,
@@ -63,12 +54,12 @@ export async function executeCouncilWorkflow(
           input.turnId,
           input.records,
           input.errors,
-          {
+          toWorkflowCouncilError(error, {
             code: 'agent_execution_failed',
             message: `Agent ${agent.id} failed in council deliberation: ${
               error instanceof Error ? error.message : String(error)
             }`,
-          },
+          }),
           agent.id
         );
       }
@@ -86,7 +77,10 @@ export async function executeCouncilWorkflow(
           input.turnId,
           agent,
           'council',
-          createDerivedEvent(input.event, buildCouncilSynthesisPrompt(privateThoughts)),
+          createDerivedEvent(
+            input.event,
+            buildCouncilSynthesisPrompt(privateThoughts, deps.prompts)
+          ),
           [...input.stateMessages, ...input.privateMessages],
           input.options,
           input.records,
@@ -111,12 +105,12 @@ export async function executeCouncilWorkflow(
           input.turnId,
           input.records,
           input.errors,
-          {
+          toWorkflowCouncilError(error, {
             code: 'agent_execution_failed',
             message: `Agent ${agent.id} failed in council synthesis: ${
               error instanceof Error ? error.message : String(error)
             }`,
-          },
+          }),
           agent.id
         );
       }
@@ -157,9 +151,15 @@ export async function* streamCouncilWorkflow(
         yield createMessageEmittedEvent(input.councilId, input.turnId, message);
       }
     } catch (error) {
-      yield createErrorEvent(input.councilId, input.turnId, agent.id, {
-        message: error instanceof Error ? error.message : String(error),
-      });
+      yield createErrorEvent(
+        input.councilId,
+        input.turnId,
+        agent.id,
+        toWorkflowCouncilError(error, {
+          code: 'agent_execution_failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      );
     }
 
     yield createAgentFinishedEvent(input.councilId, input.turnId, agent.id);
@@ -169,7 +169,10 @@ export async function* streamCouncilWorkflow(
     return;
   }
 
-  const synthesisPrompt = buildCouncilSynthesisPrompt(privateThoughts);
+  const synthesisPrompt = buildCouncilSynthesisPrompt(
+    privateThoughts,
+    deps.prompts
+  );
 
   for (const agent of input.activeAgents) {
     yield createAgentStartedEvent(input.councilId, input.turnId, agent.id);
@@ -196,10 +199,15 @@ export async function* streamCouncilWorkflow(
         yield createMessageEmittedEvent(input.councilId, input.turnId, message);
       }
     } catch (error) {
-      yield createErrorEvent(input.councilId, input.turnId, agent.id, {
-        code: 'agent_execution_failed',
-        message: error instanceof Error ? error.message : String(error),
-      });
+      yield createErrorEvent(
+        input.councilId,
+        input.turnId,
+        agent.id,
+        toWorkflowCouncilError(error, {
+          code: 'agent_execution_failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      );
     }
 
     yield createAgentFinishedEvent(input.councilId, input.turnId, agent.id);

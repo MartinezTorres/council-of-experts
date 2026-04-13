@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import {
   createCouncilModule,
   generateId,
+  isAgentContextExhaustedError,
   OpenAIChatCompletionsEngine,
   type AgentDefinition,
   type CouncilModule,
@@ -9,6 +10,7 @@ import {
   type EngineInput,
   type EngineOutput,
   type EngineSpec,
+  type PromptMessage,
   type ToolCall,
   type ToolDefinition,
   type ToolResult,
@@ -19,8 +21,18 @@ import {
   DocumentVault,
   mergeAgentTools,
 } from './documentVault.js';
-import { buildChatEvent, buildTranscript } from './transcript.js';
+import {
+  buildProviderChatEvent,
+  normalizeOpenAIRequestMessages,
+} from './requestMapping.js';
+import { buildDebugTranscript } from './debugTranscript.js';
+import {
+  buildOracleExternalSynthesisPrompt,
+  buildOraclePreparationPrompt,
+  buildProviderRequestInstruction,
+} from './prompts.js';
 import type {
+  AgentExecutionTrace,
   ModelStats,
   OpenAIChatCompletionRequest,
   OpenAIToolChoice,
@@ -28,69 +40,6 @@ import type {
   ResolvedProviderConfig,
   VirtualModelRuntime,
 } from './types.js';
-
-const JSON_BODY_LIMIT_BYTES = 1_000_000;
-const TRACE_LIMIT = 100;
-
-function buildPrivateDeliberation(input: {
-  transcript: string;
-  privateMessages: Array<{ author: { name: string }; content: string }>;
-}) {
-  return input.privateMessages.length === 0
-    ? '(no private deliberation)'
-    : input.privateMessages
-        .map((message) => `${message.author.name}: ${message.content}`)
-        .join('\n\n');
-}
-
-function buildOraclePreparationPrompt(input: {
-  transcript: string;
-  privateMessages: Array<{ author: { name: string }; content: string }>;
-  hasLocalDocuments: boolean;
-}): string {
-  const privateDeliberation = buildPrivateDeliberation(input);
-  return [
-    'You are the Oracle, speaking with one unified voice for the council.',
-    'Prepare the best possible assistant response for the conversation below.',
-    input.hasLocalDocuments
-      ? 'If you need one of your assigned documents, call vault.read(path) with the exact path.'
-      : 'No local documents are available in this step.',
-    'Do not call client-visible tools in this step.',
-    'Do not mention hidden deliberation or internal agents.',
-    '',
-    'Original request transcript:',
-    input.transcript,
-    '',
-    'Private deliberation from council members:',
-    privateDeliberation,
-  ].join('\n');
-}
-
-function buildOracleExternalSynthesisPrompt(input: {
-  transcript: string;
-  privateMessages: Array<{ author: { name: string }; content: string }>;
-  draftContent?: string;
-}): string {
-  const privateDeliberation = buildPrivateDeliberation(input);
-
-  return [
-    'You are the Oracle, speaking with one unified voice for the council.',
-    'Produce the single best next assistant action for the conversation below.',
-    'If client-visible tools are available and necessary, you may call them.',
-    'Do not mention hidden deliberation or internal agents.',
-    '',
-    'Original request transcript:',
-    input.transcript,
-    '',
-    'Private deliberation from council members:',
-    privateDeliberation,
-    '',
-    'Preparation draft:',
-    input.draftContent && input.draftContent.trim().length > 0
-      ? input.draftContent
-      : '(no draft)',
-  ].join('\n');
-}
 
 function normalizeOpenAITools(tools: OpenAIChatCompletionRequest['tools']): ToolDefinition[] | undefined {
   if (!tools || tools.length === 0) {
@@ -135,6 +84,68 @@ function normalizeToolChoice(
   throw new HttpError(400, 'Unsupported tool_choice value');
 }
 
+function extractRequestDebug(
+  value: unknown
+): AgentExecutionTrace['requestDebug'] | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const requestDebug = (value as { requestDebug?: unknown }).requestDebug;
+  if (!requestDebug || typeof requestDebug !== 'object') {
+    return undefined;
+  }
+
+  return requestDebug as AgentExecutionTrace['requestDebug'];
+}
+
+function buildAgentExecutionTraceFromMessage(
+  message: TurnResult['privateMessages'][number]
+): AgentExecutionTrace {
+  return {
+    agentId: message.author.id,
+    phase: 'deliberation',
+    status: 'succeeded',
+    messageTimestamp: message.timestamp,
+    requestDebug: extractRequestDebug(message.metadata),
+  };
+}
+
+function buildAgentExecutionTraceFromError(
+  entry: TurnResult['errors'][number]
+): AgentExecutionTrace {
+  return {
+    agentId: entry.agentId ?? 'unknown',
+    phase: 'deliberation',
+    status: 'failed',
+    errorCode: entry.error.code,
+    errorMessage: entry.error.message,
+    requestDebug: extractRequestDebug(entry.error.data),
+  };
+}
+
+function buildCouncilAgentExecutions(result: TurnResult): AgentExecutionTrace[] {
+  const successfulAgents = result.privateMessages.map((message) =>
+    buildAgentExecutionTraceFromMessage(message)
+  );
+  const failedAgents = result.errors.map((entry) =>
+    buildAgentExecutionTraceFromError(entry)
+  );
+  return [...successfulAgents, ...failedAgents];
+}
+
+function buildSynthesisExecutionTrace(
+  agentId: string,
+  output: EngineOutput | undefined
+): AgentExecutionTrace {
+  return {
+    agentId,
+    phase: 'synthesis',
+    status: 'succeeded',
+    requestDebug: extractRequestDebug(output?.metadata),
+  };
+}
+
 class HttpError extends Error {
   constructor(
     readonly statusCode: number,
@@ -175,14 +186,17 @@ function createErrorPayload(error: HttpError | Error) {
   };
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+async function readJsonBody(
+  req: IncomingMessage,
+  limitBytes: number
+): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
 
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.length;
-    if (total > JSON_BODY_LIMIT_BYTES) {
+    if (total > limitBytes) {
       throw new HttpError(413, 'Request body too large');
     }
     chunks.push(buffer);
@@ -230,6 +244,7 @@ export class CouncilOpenAIProviderApp {
       this.stats.set(modelId, {
         requestCount: 0,
         successCount: 0,
+        degradedCount: 0,
         errorCount: 0,
         inFlightCount: 0,
         totalLatencyMs: 0,
@@ -282,7 +297,8 @@ export class CouncilOpenAIProviderApp {
         model: agentConfig.engine.model,
         contextWindow: agentConfig.engine.contextWindow,
         charsPerToken: agentConfig.engine.charsPerToken,
-        responseReserveTokens: agentConfig.engine.responseReserveTokens,
+        promptBudgetRatio: agentConfig.engine.promptBudgetRatio,
+        promptSummaryPolicy: agentConfig.engine.promptSummaryPolicy,
         settings: agentConfig.engine.settings,
       };
 
@@ -300,7 +316,7 @@ export class CouncilOpenAIProviderApp {
       });
 
       engines[engineId] = new OpenAIChatCompletionsEngine(
-        agentConfig.engine.timeoutMs ?? 60000
+        agentConfig.engine.timeoutMs
       );
     }
 
@@ -309,11 +325,13 @@ export class CouncilOpenAIProviderApp {
       engines,
       toolHost: documentVault.createToolHost(),
       runtime: config.runtime,
+      prompts: config.councilPrompts,
     });
 
     return {
       id: modelId,
       description: config.description,
+      synthesizerAgentId: config.synthesizerAgentId,
       agents,
       documentVault,
       councilModule,
@@ -344,7 +362,10 @@ export class CouncilOpenAIProviderApp {
       if (url.pathname === '/v1/chat/completions') {
         this.assertAuthorized(req);
         assertRequestMethod(req, 'POST');
-        const body = (await readJsonBody(req)) as OpenAIChatCompletionRequest;
+        const body = (await readJsonBody(
+          req,
+          this.config.limits.requestBodyBytes
+        )) as OpenAIChatCompletionRequest;
         const payload = await this.handleChatCompletions(body);
         writeJson(res, 200, payload);
         return;
@@ -460,7 +481,8 @@ export class CouncilOpenAIProviderApp {
     const requestId = generateId();
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
-    const transcript = buildTranscript(request);
+    const debugTranscript = buildDebugTranscript(request);
+    const promptMessages = normalizeOpenAIRequestMessages(request.messages);
     const tools = normalizeOpenAITools(request.tools);
     const toolChoice = normalizeToolChoice(request.tool_choice);
     if (!tools && toolChoice !== undefined) {
@@ -471,7 +493,7 @@ export class CouncilOpenAIProviderApp {
       model: request.model,
       startedAt,
       request,
-      transcript,
+      debugTranscript,
     };
 
     this.inFlight.set(requestId, trace);
@@ -494,7 +516,13 @@ export class CouncilOpenAIProviderApp {
       });
 
       const result = await council.post(
-        buildChatEvent(request, requestId, transcript),
+        buildProviderChatEvent({
+          model: request.model,
+          requestId,
+          user: request.user,
+          instruction: buildProviderRequestInstruction(this.config.prompts),
+          promptMessages,
+        }),
         { mode: 'oracle', emitPublicOracle: false }
       );
       const status = await council.getStatus();
@@ -502,14 +530,93 @@ export class CouncilOpenAIProviderApp {
       await council.dispose();
       council = undefined;
 
-      const synthesis = await this.runOracleSynthesis({
-        requestId,
-        runtime,
-        transcript,
-        privateMessages: result.privateMessages,
-        tools,
-        toolChoice,
-      });
+      if (
+        result.privateMessages.length === 0 &&
+        result.errors.length > 0 &&
+        result.errors.every((entry) => entry.error.code === 'agent_context_exhausted')
+      ) {
+        const response = this.toChatCompletionResponse(requestId, request.model, {
+          content: this.config.fallbacks.agentContextExhaustedMessage,
+        });
+        const durationMs = Date.now() - startedAtMs;
+
+        stats.successCount += 1;
+        stats.degradedCount += 1;
+        stats.inFlightCount -= 1;
+        stats.totalLatencyMs += durationMs;
+        stats.lastLatencyMs = durationMs;
+
+        trace.endedAt = new Date().toISOString();
+        trace.durationMs = durationMs;
+          trace.council = {
+            config: councilConfig,
+            status,
+            publicMessages: result.publicMessages,
+            privateMessages: result.privateMessages,
+            records: result.records,
+            errors: result.errors,
+            agentExecutions: buildCouncilAgentExecutions(result),
+          };
+          trace.synthesis = {
+            agentId: runtime.synthesizerAgentId,
+            finalOutput: {
+              content: this.config.fallbacks.agentContextExhaustedMessage,
+            },
+          };
+          trace.response = response;
+          this.finishTrace(trace);
+
+        return response;
+      }
+
+      let synthesis;
+      try {
+        synthesis = await this.runOracleSynthesis({
+          requestId,
+          runtime,
+          promptMessages,
+          privateMessages: result.privateMessages,
+          tools,
+          toolChoice,
+        });
+      } catch (error) {
+        if (isAgentContextExhaustedError(error)) {
+          const response = this.toChatCompletionResponse(requestId, request.model, {
+            content: this.config.fallbacks.agentContextExhaustedMessage,
+          });
+          const durationMs = Date.now() - startedAtMs;
+
+          stats.successCount += 1;
+          stats.degradedCount += 1;
+          stats.inFlightCount -= 1;
+          stats.totalLatencyMs += durationMs;
+          stats.lastLatencyMs = durationMs;
+
+          trace.endedAt = new Date().toISOString();
+          trace.durationMs = durationMs;
+          trace.council = {
+            config: councilConfig,
+            status,
+            publicMessages: result.publicMessages,
+            privateMessages: result.privateMessages,
+            records: result.records,
+            errors: result.errors,
+            agentExecutions: buildCouncilAgentExecutions(result),
+          };
+          trace.synthesis = {
+            agentId: runtime.synthesizerAgentId,
+            finalOutput: {
+              content: this.config.fallbacks.agentContextExhaustedMessage,
+            },
+          };
+          trace.response = response;
+          this.finishTrace(trace);
+
+          return response;
+        }
+
+        throw error;
+      }
       const response = this.toChatCompletionResponse(
         requestId,
         request.model,
@@ -531,9 +638,14 @@ export class CouncilOpenAIProviderApp {
         privateMessages: result.privateMessages,
         records: result.records,
         errors: result.errors,
+        agentExecutions: buildCouncilAgentExecutions(result),
       };
       trace.synthesis = {
         agentId: synthesis.agent.id,
+        execution: buildSynthesisExecutionTrace(
+          synthesis.agent.id,
+          synthesis.output
+        ),
         localDocuments: runtime.documentVault.listDocumentsForAgent(
           synthesis.agent.id
         ),
@@ -624,7 +736,7 @@ export class CouncilOpenAIProviderApp {
   private async runOracleSynthesis(input: {
     requestId: string;
     runtime: VirtualModelRuntime;
-    transcript: string;
+    promptMessages: PromptMessage[];
     privateMessages: TurnResult['privateMessages'];
     tools?: ToolDefinition[];
     toolChoice?: OpenAIToolChoice;
@@ -635,9 +747,13 @@ export class CouncilOpenAIProviderApp {
     localToolResults: ToolResult[];
     draftOutput?: EngineOutput;
   }> {
-    const agent = input.runtime.agents[0];
+    const agent = input.runtime.agents.find(
+      (entry) => entry.id === input.runtime.synthesizerAgentId
+    );
     if (!agent) {
-      throw new Error(`Virtual model ${input.runtime.id} has no agents`);
+      throw new Error(
+        `Virtual model ${input.runtime.id} is missing synthesizer agent ${input.runtime.synthesizerAgentId}`
+      );
     }
 
     const engine = input.runtime.engines[agent.engine.id];
@@ -657,7 +773,7 @@ export class CouncilOpenAIProviderApp {
         runtime: input.runtime,
         agent,
         engine,
-        transcript: input.transcript,
+        promptMessages: input.promptMessages,
         privateMessages: input.privateMessages,
         localTool,
         documentVault: input.runtime.documentVault,
@@ -682,7 +798,7 @@ export class CouncilOpenAIProviderApp {
       requestId: input.requestId,
       agent,
       engine,
-      transcript: input.transcript,
+      promptMessages: input.promptMessages,
       privateMessages: input.privateMessages,
       draftContent: draftOutput?.content,
       tools: input.tools,
@@ -703,6 +819,7 @@ export class CouncilOpenAIProviderApp {
     turnId: string;
     agent: AgentDefinition;
     content: string;
+    promptMessages: PromptMessage[];
     tools?: ToolDefinition[];
     toolCalls?: ToolCall[];
     toolResults?: ToolResult[];
@@ -721,6 +838,7 @@ export class CouncilOpenAIProviderApp {
           name: 'OpenAI Provider',
         },
         content: input.content,
+        promptMessages: input.promptMessages,
         timestamp: new Date().toISOString(),
         metadata:
           input.toolChoice !== undefined
@@ -741,7 +859,7 @@ export class CouncilOpenAIProviderApp {
     runtime: VirtualModelRuntime;
     agent: AgentDefinition;
     engine: EngineAdapter;
-    transcript: string;
+    promptMessages: PromptMessage[];
     privateMessages: TurnResult['privateMessages'];
     localTool?: ToolDefinition;
     documentVault: DocumentVault;
@@ -761,10 +879,11 @@ export class CouncilOpenAIProviderApp {
           requestId: input.requestId,
           turnId: `synthesis-prep-${input.requestId}`,
           agent: input.agent,
+          promptMessages: input.promptMessages,
           content: buildOraclePreparationPrompt({
-            transcript: input.transcript,
             privateMessages: input.privateMessages,
             hasLocalDocuments: input.localTool !== undefined,
+            prompts: this.config.prompts,
           }),
           tools: input.localTool ? [input.localTool] : undefined,
           toolCalls:
@@ -815,7 +934,7 @@ export class CouncilOpenAIProviderApp {
     requestId: string;
     agent: AgentDefinition;
     engine: EngineAdapter;
-    transcript: string;
+    promptMessages: PromptMessage[];
     privateMessages: TurnResult['privateMessages'];
     draftContent?: string;
     tools: ToolDefinition[];
@@ -826,10 +945,11 @@ export class CouncilOpenAIProviderApp {
         requestId: input.requestId,
         turnId: `synthesis-${input.requestId}`,
         agent: input.agent,
+        promptMessages: input.promptMessages,
         content: buildOracleExternalSynthesisPrompt({
-          transcript: input.transcript,
           privateMessages: input.privateMessages,
           draftContent: input.draftContent,
+          prompts: this.config.prompts,
         }),
         tools: input.tools,
         toolChoice: input.toolChoice ?? 'auto',
@@ -850,8 +970,8 @@ export class CouncilOpenAIProviderApp {
   private finishTrace(trace: RequestTrace): void {
     this.inFlight.delete(trace.id);
     this.recentTraces.unshift(trace);
-    if (this.recentTraces.length > TRACE_LIMIT) {
-      this.recentTraces.length = TRACE_LIMIT;
+    if (this.recentTraces.length > this.config.debug.traceRetention) {
+      this.recentTraces.length = this.config.debug.traceRetention;
     }
   }
 
@@ -865,6 +985,7 @@ export class CouncilOpenAIProviderApp {
       virtualModels: Array.from(this.modelRuntimes.values()).map((runtime) => ({
         id: runtime.id,
         description: runtime.description,
+        synthesizerAgentId: runtime.synthesizerAgentId,
         runtime: runtime.councilModule.getConfig().runtime,
         stats: this.stats.get(runtime.id),
         agents: runtime.agents,

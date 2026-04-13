@@ -1,4 +1,5 @@
 import { AgentDefinition } from '../types.js';
+import { buildOracleSynthesisPrompt } from '../prompts.js';
 import {
   createAgentFinishedEvent,
   createAgentMessage,
@@ -8,21 +9,11 @@ import {
   createMessageEmittedEvent,
   createMessageRecord,
   createOracleMessage,
+  toWorkflowCouncilError,
   ExecuteWorkflowInput,
   StreamWorkflowInput,
   WorkflowDependencies,
 } from './shared.js';
-
-function buildOraclePrompt(
-  privateThoughts: Array<{ agent: AgentDefinition; content: string }>
-): string {
-  return `You are the Oracle, speaking with one unified voice for the council.
-
-Private deliberation from council members:
-${privateThoughts.map((t) => `${t.agent.name}: ${t.content}`).join('\n\n')}
-
-Synthesize a single, unified response that represents the council's collective wisdom:`;
-}
 
 export async function executeOracleWorkflow(
   input: ExecuteWorkflowInput,
@@ -65,12 +56,12 @@ export async function executeOracleWorkflow(
           input.turnId,
           input.records,
           input.errors,
-          {
+          toWorkflowCouncilError(error, {
             code: 'agent_execution_failed',
             message: `Agent ${agent.id} failed in oracle deliberation: ${
               error instanceof Error ? error.message : String(error)
             }`,
-          },
+          }),
           agent.id
         );
       }
@@ -85,14 +76,39 @@ export async function executeOracleWorkflow(
     return;
   }
 
-  const synthesisAgent = input.activeAgents[0];
+  if (input.oracleSpeakerError) {
+    deps.recordTurnError(
+      input.turnId,
+      input.records,
+      input.errors,
+      input.oracleSpeakerError
+    );
+    return;
+  }
+
+  const synthesisAgent = input.oracleSpeaker;
+  if (!synthesisAgent) {
+    deps.recordTurnError(
+      input.turnId,
+      input.records,
+      input.errors,
+      {
+        code: 'oracle_speaker_unavailable',
+        message: 'No oracle speaker was available for public synthesis',
+      }
+    );
+    return;
+  }
 
   try {
     const output = await deps.generateWithTools(
       input.turnId,
       synthesisAgent,
       'oracle',
-      createDerivedEvent(input.event, buildOraclePrompt(privateThoughts)),
+      createDerivedEvent(
+        input.event,
+        buildOracleSynthesisPrompt(privateThoughts, deps.prompts)
+      ),
       [...input.stateMessages, ...input.privateMessages],
       input.options,
       input.records,
@@ -113,12 +129,12 @@ export async function executeOracleWorkflow(
       input.turnId,
       input.records,
       input.errors,
-      {
+      toWorkflowCouncilError(error, {
         code: 'oracle_synthesis_failed',
         message: `Oracle synthesis failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
-      },
+      }),
       synthesisAgent.id
     );
   }
@@ -158,10 +174,15 @@ export async function* streamOracleWorkflow(
         yield createMessageEmittedEvent(input.councilId, input.turnId, message);
       }
     } catch (error) {
-      yield createErrorEvent(input.councilId, input.turnId, agent.id, {
-        code: 'agent_execution_failed',
-        message: error instanceof Error ? error.message : String(error),
-      });
+      yield createErrorEvent(
+        input.councilId,
+        input.turnId,
+        agent.id,
+        toWorkflowCouncilError(error, {
+          code: 'agent_execution_failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      );
     }
 
     yield createAgentFinishedEvent(input.councilId, input.turnId, agent.id);
@@ -175,7 +196,24 @@ export async function* streamOracleWorkflow(
     return;
   }
 
-  const synthesisAgent = input.activeAgents[0];
+  if (input.oracleSpeakerError) {
+    yield createErrorEvent(
+      input.councilId,
+      input.turnId,
+      'oracle',
+      input.oracleSpeakerError
+    );
+    return;
+  }
+
+  const synthesisAgent = input.oracleSpeaker;
+  if (!synthesisAgent) {
+    yield createErrorEvent(input.councilId, input.turnId, 'oracle', {
+      code: 'oracle_speaker_unavailable',
+      message: 'No oracle speaker was available for public synthesis',
+    });
+    return;
+  }
   yield createAgentStartedEvent(input.councilId, input.turnId, 'oracle');
 
   try {
@@ -183,7 +221,10 @@ export async function* streamOracleWorkflow(
       input.turnId,
       synthesisAgent,
       'oracle',
-      createDerivedEvent(input.event, buildOraclePrompt(privateThoughts)),
+      createDerivedEvent(
+        input.event,
+        buildOracleSynthesisPrompt(privateThoughts, deps.prompts)
+      ),
       [...input.stateMessages, ...input.pendingMessages],
       input.options
     );
@@ -198,10 +239,15 @@ export async function* streamOracleWorkflow(
       yield createMessageEmittedEvent(input.councilId, input.turnId, message);
     }
   } catch (error) {
-    yield createErrorEvent(input.councilId, input.turnId, 'oracle', {
-      code: 'oracle_synthesis_failed',
-      message: error instanceof Error ? error.message : String(error),
-    });
+    yield createErrorEvent(
+      input.councilId,
+      input.turnId,
+      'oracle',
+      toWorkflowCouncilError(error, {
+        code: 'oracle_synthesis_failed',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    );
   }
 
   yield createAgentFinishedEvent(input.councilId, input.turnId, 'oracle');

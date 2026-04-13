@@ -1,7 +1,12 @@
 {
   "workspaceRoot": "../..",
   "runtime": {
-    "initialMode": "open"
+    "initialMode": "open",
+    "agentSelectionStrategy": "all_in_order",
+    "oracleSpeakerStrategy": "first_active"
+  },
+  "prompts": {
+    "oracleSynthesisTemplate": "You are the Oracle, speaking with one voice.\\n\\nPrivate deliberation:\\n{{privateThoughts}}\\n\\nGive one direct answer."
   },
   "agents": [
     {
@@ -16,7 +21,13 @@
         "model": "Qwen3.5-27B",
         "contextWindow": 8192,
         "charsPerToken": 4,
-        "responseReserveTokens": 1024,
+        "promptBudgetRatio": 0.5,
+        "promptSummaryPolicy": {
+          "maxMessagesPerGroup": 3,
+          "minGroupSnippetChars": 24,
+          "minMessageSnippetChars": 18,
+          "shrinkTargetRatio": 0.95
+        },
         "settings": {
           "temperature": 0
         },
@@ -35,7 +46,6 @@
         "model": "Qwen3.5-27B",
         "contextWindow": 6144,
         "charsPerToken": 4,
-        "responseReserveTokens": 768,
         "settings": {
           "temperature": 0
         },
@@ -54,7 +64,6 @@
         "model": "Qwen3.5-27B",
         "contextWindow": 12288,
         "charsPerToken": 4,
-        "responseReserveTokens": 1536,
         "settings": {
           "temperature": 0
         },

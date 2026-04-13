@@ -189,7 +189,7 @@ export class ChatLoop {
         console.log('=== Turn Errors ===\n');
         for (const entry of result.errors) {
           const prefix = entry.agentId ? `[${entry.agentId}] ` : '';
-          console.log(`${prefix}${entry.error.message}`);
+          console.log(`${prefix}${this.renderTurnError(entry.error)}`);
         }
         console.log('');
       }
@@ -201,5 +201,13 @@ export class ChatLoop {
   stop(): void {
     this.running = false;
     this.rl.close();
+  }
+
+  private renderTurnError(error: { code?: string; message: string }): string {
+    if (error.code === 'agent_context_exhausted') {
+      return "It's dizzy.";
+    }
+
+    return error.message;
   }
 }
