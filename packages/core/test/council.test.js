@@ -1029,6 +1029,179 @@ test('runtime.maxAgentReplies becomes the default agent selection limit', async 
   assert.equal(overrideResult.publicMessages.length, 2);
 });
 
+test('activeAgentIds selects an ordered subset and still respects maxAgentReplies', async () => {
+  const engine = {
+    async generate(input) {
+      return { content: `reply-${input.agent.id}` };
+    },
+  };
+
+  const module = createCouncilModule({
+    agents: [createAgent('a'), createAgent('b'), createAgent('c')],
+    engines: { engine },
+  });
+  const council = await module.openCouncil({
+    councilId: 'active-agent-ids',
+  });
+
+  const subsetResult = await council.post(createEvent('hello'), {
+    activeAgentIds: ['c', 'a'],
+  });
+  const limitedResult = await council.post(createEvent('hello again'), {
+    activeAgentIds: ['c', 'a'],
+    maxAgentReplies: 1,
+  });
+
+  assert.deepEqual(
+    subsetResult.publicMessages.map((message) => message.author.id),
+    ['c', 'a']
+  );
+  assert.deepEqual(
+    limitedResult.publicMessages.map((message) => message.author.id),
+    ['c']
+  );
+});
+
+test('invalid activeAgentIds fails the turn without changing council mode', async () => {
+  let generateCalls = 0;
+  const engine = {
+    async generate() {
+      generateCalls += 1;
+      return { content: 'should not be called' };
+    },
+  };
+
+  const module = createCouncilModule({
+    agents: [createAgent('a'), createAgent('b')],
+    engines: { engine },
+  });
+  const council = await module.openCouncil({
+    councilId: 'invalid-active-agent-ids',
+    initialMode: 'open',
+  });
+
+  const result = await council.post(createEvent('hello'), {
+    mode: 'council',
+    activeAgentIds: ['b', 'missing', 'b'],
+  });
+
+  assert.equal(generateCalls, 0);
+  assert.equal(council.getMode(), 'open');
+  assert.equal(result.publicMessages.length, 0);
+  assert.equal(result.privateMessages.length, 0);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].error.code, 'invalid_active_agent_ids');
+  assert.deepEqual(result.errors[0].error.data.duplicateAgentIds, ['b']);
+  assert.deepEqual(result.errors[0].error.data.unknownAgentIds, ['missing']);
+  assert.deepEqual(
+    result.records.map((record) => record.type),
+    ['error', 'turn.completed']
+  );
+});
+
+test('syncAgents updates the live roster without clearing story', async () => {
+  const engine = {
+    async generate(input) {
+      return { content: `${input.agent.id}:${input.agent.systemPrompt}` };
+    },
+  };
+
+  const module = createCouncilModule({
+    agents: [createAgent('a'), createAgent('b')],
+    engines: { engine },
+  });
+  const council = await module.openCouncil({
+    councilId: 'sync-agents-live',
+  });
+
+  await council.post(createEvent('first turn'));
+
+  const syncResult = await council.syncAgents({
+    reason: 'refresh roster',
+    agents: [
+      {
+        ...createAgent('a'),
+        name: 'Agent A Updated',
+        systemPrompt: 'updated prompt',
+      },
+      createAgent('c'),
+    ],
+  });
+
+  assert.deepEqual(syncResult.added, ['c']);
+  assert.deepEqual(syncResult.updated, ['a']);
+  assert.deepEqual(syncResult.removed, ['b']);
+  assert.deepEqual(
+    syncResult.records.map((record) => record.type),
+    ['agent.updated', 'agent.added', 'agent.removed']
+  );
+  assert.equal(syncResult.records[0].reason, 'refresh roster');
+
+  const listedAgents = council.listAgents();
+  assert.deepEqual(
+    listedAgents.map((agent) => agent.id),
+    ['a', 'c']
+  );
+  listedAgents[0].name = 'tampered';
+  assert.equal(council.listAgents()[0].name, 'Agent A Updated');
+
+  const history = await council.getMessages({ visibility: 'all' });
+  assert.deepEqual(
+    history.map((message) => message.author.id),
+    ['a', 'b']
+  );
+
+  const nextTurn = await council.post(createEvent('second turn'));
+  assert.deepEqual(
+    nextTurn.publicMessages.map((message) => message.author.id),
+    ['a', 'c']
+  );
+  assert.equal(nextTurn.publicMessages[0].content, 'a:updated prompt');
+  assert.equal(nextTurn.publicMessages[1].content, 'c:c prompt');
+});
+
+test('replay applies roster change records to future turns', async () => {
+  const engine = {
+    async generate(input) {
+      return { content: `reply-${input.agent.id}` };
+    },
+  };
+
+  const module = createCouncilModule({
+    agents: [createAgent('a'), createAgent('b')],
+    engines: { engine },
+  });
+  const liveCouncil = await module.openCouncil({
+    councilId: 'live-sync-replay',
+  });
+
+  const syncResult = await liveCouncil.syncAgents({
+    agents: [createAgent('b'), createAgent('c')],
+    reason: 'replayable roster update',
+  });
+
+  const replayCouncil = await module.openCouncil({
+    councilId: 'replay-sync',
+  });
+  await replayCouncil.replay(
+    syncResult.records.map((record) => ({
+      type: 'council.record',
+      record,
+    }))
+  );
+
+  assert.deepEqual(
+    replayCouncil.listAgents().map((agent) => agent.id),
+    ['b', 'c']
+  );
+
+  const result = await replayCouncil.post(createEvent('hello'));
+  assert.deepEqual(
+    result.publicMessages.map((message) => message.author.id),
+    ['b', 'c']
+  );
+});
+
 test('runtime.maxRounds becomes the default tool round limit', async () => {
   const engine = {
     async generate(input) {

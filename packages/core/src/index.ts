@@ -34,6 +34,8 @@ export type {
   TurnOptions,
   CouncilRecord,
   CouncilReplayEntry,
+  SyncAgentsInput,
+  AgentSyncResult,
   TurnResult,
   TurnError,
   CouncilRuntimeEvent,

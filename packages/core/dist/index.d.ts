@@ -2,7 +2,7 @@
  * council-of-experts - Multi-agent AI orchestration runtime
  * Contract version 1
  */
-export type { CouncilError, CouncilMode, ToolDefinition, ToolRef, PromptMessage, CouncilPromptConfig, ResolvedCouncilPromptConfig, EngineSpec, AgentDefinition, PromptSummaryPolicy, EngineRequestAttemptDebug, EngineRequestDebug, OpenCouncilInput, ChatEvent, CouncilMessage, ToolCall, ToolResult, ToolExecutionContext, ToolHost, EngineInput, EngineOutput, EngineAdapter, CouncilModuleConfig, CouncilRuntimeConfig, CouncilModuleResolvedConfig, CouncilInstanceResolvedConfig, TurnOptions, CouncilRecord, CouncilReplayEntry, TurnResult, TurnError, CouncilRuntimeEvent, Council, CouncilModule, ProbeResult, DiscoveredModel, ToolProbeResult, } from './types.js';
+export type { CouncilError, CouncilMode, ToolDefinition, ToolRef, PromptMessage, CouncilPromptConfig, ResolvedCouncilPromptConfig, EngineSpec, AgentDefinition, PromptSummaryPolicy, EngineRequestAttemptDebug, EngineRequestDebug, OpenCouncilInput, ChatEvent, CouncilMessage, ToolCall, ToolResult, ToolExecutionContext, ToolHost, EngineInput, EngineOutput, EngineAdapter, CouncilModuleConfig, CouncilRuntimeConfig, CouncilModuleResolvedConfig, CouncilInstanceResolvedConfig, TurnOptions, CouncilRecord, CouncilReplayEntry, SyncAgentsInput, AgentSyncResult, TurnResult, TurnError, CouncilRuntimeEvent, Council, CouncilModule, ProbeResult, DiscoveredModel, ToolProbeResult, } from './types.js';
 export { COUNCIL_CONTRACT_VERSION } from './types.js';
 export { DEFAULT_COUNCIL_RUNTIME_CONFIG, resolveCouncilRuntimeConfig, } from './config.js';
 export { DEFAULT_COUNCIL_PROMPTS, resolveCouncilPromptConfig, } from './prompts.js';

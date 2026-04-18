@@ -45,8 +45,18 @@ const mode = council.getMode(); // 'open' | 'council' | 'oracle'
 // Get resolved config
 const config = council.getConfig();
 
+// Inspect current live roster
+const agents = council.listAgents();
+
 // Replay persisted records (pure state reconstruction)
 await council.replay(replayEntries);
+
+// Replace the current live roster without clearing story
+const sync = await council.syncAgents({
+  agents: nextAgentRoster,
+  reason: 'settings changed'
+});
+await persist(sync.records);
 
 // Post a new event (turn execution)
 const result = await council.post(chatEvent, options);
@@ -80,6 +90,13 @@ interface TurnResult {
   privateMessages: CouncilMessage[];
   records: CouncilRecord[];  // MUST be persisted by host
   errors: TurnError[];
+}
+
+interface AgentSyncResult {
+  added: string[];
+  updated: string[];
+  removed: string[];
+  records: CouncilRecord[]; // persist if roster changes should survive replay
 }
 ```
 
@@ -161,6 +178,16 @@ interface ChatEvent {
   }>;
   timestamp?: string | number | Date;
   metadata?: Record<string, unknown>;
+}
+
+interface TurnOptions {
+  mode?: CouncilMode;
+  maxRounds?: number;
+  maxAgentReplies?: number;
+  emitPublicOracle?: boolean;
+  oracleSpeakerAgentId?: string;
+  trace?: boolean;
+  activeAgentIds?: string[];
 }
 
 // Council message (output)
@@ -258,6 +285,16 @@ interface TurnError {
 - `createCouncilModule({ prompts })` makes the built-in council/oracle workflow prompts explicit; the module resolves those templates once and passes them to the runtime and built-in adapter as `EngineInput.promptConfig`.
 - `ChatEvent.promptMessages` is optional structured prior chat history for the built-in OpenAI adapter; it uses the same packer and summary policy instead of flattening that history into a single transcript string.
 - `TurnOptions.maxRounds` limits tool-call round trips per agent. The module-level default comes from `createCouncilModule({ runtime: { maxRounds } })`, and defaults to `3`.
+- `TurnOptions.activeAgentIds` is an ordered per-turn subset. If provided, only those agents are considered for the turn, and `maxAgentReplies` may still further limit that ordered list.
+
+### Dynamic Rosters
+
+- `council.listAgents()` returns detached snapshots of the current live roster.
+- `council.syncAgents({ agents, reason })` replaces the current live roster without clearing message history.
+- Existing agent ids are updated in place and keep their place in the default `all_in_order` selection order.
+- Missing ids are removed from future selection, but their historical messages remain in the story.
+- New ids are appended to the live roster and join the existing story.
+- `syncAgents(...).records` contains replayable `agent.added`, `agent.updated`, and `agent.removed` records if the host wants roster changes to survive reboot.
 - Non-stream execution failures are surfaced in `TurnResult.errors` and durable `error` records.
 
 ## Operating Modes

@@ -92,11 +92,13 @@ Important rules:
 
 If the host wants private council messages, mode transitions, tool activity, and other council activity to survive reboot, it must persist the corresponding `CouncilRecord` values returned by the module.
 
+That includes roster changes returned by `syncAgents(...)`.
+
 ## 5. Durability model
 
 `council-of-experts` is stateful in memory but not durable by itself.
 
-A host must treat `TurnResult.records` as the durable output of a turn.
+A host must treat `TurnResult.records` and `AgentSyncResult.records` as the durable output of council mutations.
 
 Recommended sequence:
 
@@ -104,6 +106,12 @@ Recommended sequence:
 2. call `council.post(...)` or `council.stream(...)`
 3. persist the returned `CouncilRecord[]`
 4. only then treat the council turn as durably committed
+
+For live roster changes:
+
+1. call `council.syncAgents(...)`
+2. persist `AgentSyncResult.records`
+3. only then treat the new roster as durably committed
 
 If persistence of returned records fails, the host should discard the in-memory council instance and rebuild it from the durable log. This avoids divergence between durable state and in-memory state.
 
@@ -334,9 +342,36 @@ export interface TurnOptions {
   emitPublicOracle?: boolean;
   oracleSpeakerAgentId?: string;
   trace?: boolean;
+  activeAgentIds?: string[];
 }
 
 export type CouncilRecord =
+  | {
+      contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+      type: 'agent.added';
+      councilId: string;
+      timestamp: string;
+      agentId: string;
+      agent: AgentDefinition;
+      reason?: string;
+    }
+  | {
+      contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+      type: 'agent.updated';
+      councilId: string;
+      timestamp: string;
+      agentId: string;
+      agent: AgentDefinition;
+      reason?: string;
+    }
+  | {
+      contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+      type: 'agent.removed';
+      councilId: string;
+      timestamp: string;
+      agentId: string;
+      reason?: string;
+    }
   | {
       contractVersion: typeof COUNCIL_CONTRACT_VERSION;
       type: 'mode.changed';
@@ -401,6 +436,18 @@ export type CouncilReplayEntry =
       type: 'council.record';
       record: CouncilRecord;
     };
+
+export interface SyncAgentsInput {
+  agents: AgentDefinition[];
+  reason?: string;
+}
+
+export interface AgentSyncResult {
+  added: string[];
+  updated: string[];
+  removed: string[];
+  records: CouncilRecord[];
+}
 
 export interface TurnResult {
   turnId: string;
@@ -488,9 +535,13 @@ export interface Council {
 
   getConfig(): CouncilInstanceResolvedConfig;
 
+  listAgents(): AgentDefinition[];
+
   replay(
     entries: Iterable<CouncilReplayEntry> | AsyncIterable<CouncilReplayEntry>
   ): Promise<void>;
+
+  syncAgents(input: SyncAgentsInput): Promise<AgentSyncResult>;
 
   post(event: ChatEvent, options?: TurnOptions): Promise<TurnResult>;
 
@@ -543,7 +594,7 @@ Hosts should call `replay(...)` during bootstrap, using the original append orde
 - emit durable records
 - mutate host persistence
 
-A council should be able to recover its visible and private message history, mode, and tool history from replayed records.
+A council should be able to recover its visible and private message history, mode, tool history, and current live roster from replayed records.
 
 ### 8.3 `post(...)`
 
@@ -560,6 +611,13 @@ The council may:
 
 The host persists the returned records.
 
+If `TurnOptions.activeAgentIds` is provided:
+
+- it is treated as an ordered subset
+- only those agents are eligible for the turn
+- `maxAgentReplies` may further limit that ordered subset
+- unknown or duplicate ids produce a structured turn error and the turn does not execute agent work
+
 ### 8.4 `stream(...)`
 
 `stream(...)` is the live observation API for a turn.
@@ -567,6 +625,25 @@ The host persists the returned records.
 It exposes runtime events while a turn is running. It is intended for developer tooling, progress monitoring, hidden-channel inspection, and real-time UI.
 
 `stream(...)` does not replace `TurnResult.records`. The records remain the durable replay contract.
+
+### 8.4a `syncAgents(...)`
+
+`syncAgents(...)` replaces the current live roster without clearing council story.
+
+Recommended semantics:
+
+- agent identity is keyed by `AgentDefinition.id`
+- existing ids are updated in place
+- existing ids keep their relative order in the default `all_in_order` selection strategy
+- missing ids are removed from future selection
+- new ids are appended to the live roster
+- historical messages remain part of story even if the roster changes later
+
+`syncAgents(...)` returns replayable roster-change records:
+
+- `agent.added`
+- `agent.updated`
+- `agent.removed`
 
 ### 8.5 `getMessages(...)`
 
@@ -592,6 +669,12 @@ For `CouncilModule`, it exposes module-level defaults such as `initialMode`, `ma
 For `Council`, it exposes the council id, the effective initial mode used when the council was opened, and the same resolved runtime defaults and prompt templates.
 
 For the built-in OpenAI adapter, prompt-packing policy is not part of `getConfig()`. It remains agent-level engine configuration through `EngineSpec.promptBudgetRatio` and `EngineSpec.promptSummaryPolicy`, and the effective values are exposed per call under `EngineOutput.metadata.tokenEstimate.promptPack`.
+
+### 8.5b `listAgents()`
+
+`listAgents()` returns detached snapshots of the current live roster.
+
+Mutating the returned array or agent definitions must not mutate internal council state.
 
 ### 8.6 `getStatus()`
 
@@ -645,6 +728,14 @@ A `CouncilRecord` is the replayable durable representation of council activity. 
 
 The host does not need to understand all internal meaning of the records. It only needs to persist them and replay them in order.
 
+Roster changes are represented through:
+
+- `agent.added`
+- `agent.updated`
+- `agent.removed`
+
+For replayability, `agent.added` and `agent.updated` carry the resulting `AgentDefinition`.
+
 ## 10. Tools
 
 Tool execution is split across the boundary.
@@ -678,6 +769,7 @@ Every tool call that is intended to survive reboot should be represented in the 
 - For the built-in OpenAI adapter, prompt-packing policy is explicit through `EngineSpec.promptBudgetRatio` and `EngineSpec.promptSummaryPolicy`. If omitted, the exported defaults are used.
 - For the built-in OpenAI adapter, `ChatEvent.promptMessages` can carry structured prior chat history. That history is packed with the same budgeting and summary policy as native council history instead of being flattened into a single transcript string.
 - `TurnOptions.maxRounds` limits tool-call round trips per agent. If omitted, the module runtime default is used; the built-in default is `3`.
+- `TurnOptions.activeAgentIds` makes per-turn subset selection explicit. If omitted, normal runtime selection applies. If present, it is ordered and may still be limited by `maxAgentReplies`.
 
 For oracle mode, public-speaker selection is also explicit:
 
@@ -714,6 +806,8 @@ For a host using a single append-only log per council entity, the recommended pa
 3. transform the relevant durable events into `CouncilReplayEntry[]`
 4. call `council.replay(...)`
 
+If the host persists dynamic roster changes, those replay entries should include `agent.added`, `agent.updated`, and `agent.removed` records in the original append order.
+
 ### 12.2 On new user chat input
 
 1. append the user chat event to the host log, or otherwise make it durable
@@ -722,6 +816,13 @@ For a host using a single append-only log per council entity, the recommended pa
 4. publish any public messages to the application UI
 5. inspect `TurnResult.errors` if the host wants to surface non-stream failures
 6. optionally expose private messages and `getStatus()` in diagnostics tooling
+
+### 12.2a On roster/config changes
+
+1. build the full desired live roster
+2. call `council.syncAgents({ agents, reason })`
+3. append `AgentSyncResult.records` to the host log
+4. keep using the same live council instance
 
 ### 12.3 On persistence failure after `post(...)`
 

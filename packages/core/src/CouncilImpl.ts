@@ -22,9 +22,17 @@ import {
   COUNCIL_CONTRACT_VERSION,
   CouncilRuntimeConfig,
   ResolvedCouncilPromptConfig,
+  AgentSyncResult,
+  SyncAgentsInput,
 } from './types.js';
 import { createCouncilConfigSnapshot } from './config.js';
 import { generateId } from './utils.js';
+import {
+  areAgentDefinitionsEqual,
+  createAgentRosterMap,
+  snapshotAgentDefinition,
+  snapshotAgentDefinitions,
+} from './agents.js';
 import { executeOpenWorkflow, streamOpenWorkflow } from './workflows/open.js';
 import {
   executeCouncilWorkflow,
@@ -86,7 +94,7 @@ export class CouncilImpl implements Council {
       councilSynthesisTemplate: promptConfig.councilSynthesisTemplate,
       oracleSynthesisTemplate: promptConfig.oracleSynthesisTemplate,
     };
-    this.agents = new Map(agents.map((a) => [a.id, a]));
+    this.agents = createAgentRosterMap(agents, 'agents');
     this.engines = new Map(Object.entries(engines));
     this.toolHost = toolHost;
   }
@@ -105,6 +113,11 @@ export class CouncilImpl implements Council {
     });
   }
 
+  listAgents(): AgentDefinition[] {
+    this.ensureNotDisposed();
+    return snapshotAgentDefinitions(this.agents.values());
+  }
+
   async replay(
     entries: Iterable<CouncilReplayEntry> | AsyncIterable<CouncilReplayEntry>
   ): Promise<void> {
@@ -120,6 +133,15 @@ export class CouncilImpl implements Council {
         const record = entry.record;
 
         switch (record.type) {
+          case 'agent.added':
+          case 'agent.updated':
+            this.agents.set(record.agentId, snapshotAgentDefinition(record.agent));
+            break;
+
+          case 'agent.removed':
+            this.agents.delete(record.agentId);
+            break;
+
           case 'mode.changed':
             this.state.mode = record.to;
             break;
@@ -143,21 +165,106 @@ export class CouncilImpl implements Council {
     }
   }
 
+  async syncAgents(input: SyncAgentsInput): Promise<AgentSyncResult> {
+    this.ensureNotDisposed();
+
+    const nextRoster = createAgentRosterMap(input.agents, 'input.agents');
+    const currentIds = Array.from(this.agents.keys());
+    const nextRosterIds = Array.from(nextRoster.keys());
+    const nextAgents = new Map<string, AgentDefinition>();
+    const added: string[] = [];
+    const updated: string[] = [];
+    const removed: string[] = [];
+    const records: CouncilRecord[] = [];
+
+    for (const agentId of currentIds) {
+      const currentAgent = this.agents.get(agentId);
+      const nextAgent = nextRoster.get(agentId);
+      if (!currentAgent || !nextAgent) {
+        continue;
+      }
+
+      nextAgents.set(agentId, nextAgent);
+      if (!areAgentDefinitionsEqual(currentAgent, nextAgent)) {
+        updated.push(agentId);
+        records.push(
+          this.createAgentRosterRecord('agent.updated', agentId, nextAgent, input.reason)
+        );
+      }
+    }
+
+    for (const agentId of nextRosterIds) {
+      if (this.agents.has(agentId)) {
+        continue;
+      }
+
+      const agent = nextRoster.get(agentId);
+      if (!agent) {
+        continue;
+      }
+
+      added.push(agentId);
+      nextAgents.set(agentId, agent);
+      records.push(
+        this.createAgentRosterRecord('agent.added', agentId, agent, input.reason)
+      );
+    }
+
+    for (const agentId of currentIds) {
+      if (nextRoster.has(agentId)) {
+        continue;
+      }
+
+      removed.push(agentId);
+      records.push(this.createAgentRemovedRecord(agentId, input.reason));
+    }
+
+    this.agents = nextAgents;
+
+    return {
+      added,
+      updated,
+      removed,
+      records,
+    };
+  }
+
   async post(event: ChatEvent, options?: TurnOptions): Promise<TurnResult> {
     this.ensureNotDisposed();
 
     const turnId = generateId();
     const mode = options?.mode ?? this.state.mode;
-    const activeAgents = this.selectAgents(options);
+    const records: CouncilRecord[] = [];
+    const publicMessages: CouncilMessage[] = [];
+    const privateMessages: CouncilMessage[] = [];
+    const errors: TurnError[] = [];
+    const activeAgentSelection = this.selectAgents(options);
+
+    if (activeAgentSelection.error) {
+      this.recordTurnError(
+        turnId,
+        records,
+        errors,
+        activeAgentSelection.error
+      );
+      records.push(this.createTurnCompletedRecord(turnId, mode));
+      return {
+        turnId,
+        mode,
+        nextMode: this.state.mode,
+        publicMessages,
+        privateMessages,
+        records,
+        errors: errors.map((entry) => this.snapshotTurnError(entry)),
+      };
+    }
+
+    const activeAgents = activeAgentSelection.agents;
     const oracleSpeakerSelection =
       mode === 'oracle'
         ? this.resolveOracleSpeaker(activeAgents, options)
         : { agent: undefined, error: undefined };
     const workflowDeps = this.createWorkflowDependencies();
-    const records: CouncilRecord[] = [];
-    const publicMessages: CouncilMessage[] = [];
-    const privateMessages: CouncilMessage[] = [];
-    const errors: TurnError[] = [];
 
     // Change mode if requested
     if (mode !== this.state.mode) {
@@ -234,15 +341,7 @@ export class CouncilImpl implements Council {
     }
 
     // Emit turn.completed record
-    const completedRecord: CouncilRecord = {
-      contractVersion: COUNCIL_CONTRACT_VERSION,
-      type: 'turn.completed',
-      councilId: this.state.councilId,
-      turnId,
-      timestamp: new Date().toISOString(),
-      mode,
-    };
-    records.push(completedRecord);
+    records.push(this.createTurnCompletedRecord(turnId, mode));
 
     // Commit messages in durable record order so post(), replay(), and stream()
     // converge on the same state.
@@ -267,12 +366,6 @@ export class CouncilImpl implements Council {
 
     const turnId = generateId();
     const mode = options?.mode ?? this.state.mode;
-    const activeAgents = this.selectAgents(options);
-    const oracleSpeakerSelection =
-      mode === 'oracle'
-        ? this.resolveOracleSpeaker(activeAgents, options)
-        : { agent: undefined, error: undefined };
-    const workflowDeps = this.createWorkflowDependencies();
 
     // Buffer for messages emitted this turn - committed to state after turn completes
     const pendingMessages: CouncilMessage[] = [];
@@ -285,6 +378,38 @@ export class CouncilImpl implements Council {
       timestamp: new Date().toISOString(),
       mode,
     };
+
+    const activeAgentSelection = this.selectAgents(options);
+    if (activeAgentSelection.error) {
+      yield {
+        type: 'error',
+        councilId: this.state.councilId,
+        turnId,
+        timestamp: new Date().toISOString(),
+        error: {
+          ...activeAgentSelection.error,
+          data:
+            activeAgentSelection.error.data === undefined
+              ? undefined
+              : structuredClone(activeAgentSelection.error.data),
+        },
+      };
+      yield {
+        type: 'turn.completed',
+        councilId: this.state.councilId,
+        turnId,
+        timestamp: new Date().toISOString(),
+        mode,
+      };
+      return;
+    }
+
+    const activeAgents = activeAgentSelection.agents;
+    const oracleSpeakerSelection =
+      mode === 'oracle'
+        ? this.resolveOracleSpeaker(activeAgents, options)
+        : { agent: undefined, error: undefined };
+    const workflowDeps = this.createWorkflowDependencies();
 
     // Emit mode.changed if needed
     if (mode !== this.state.mode) {
@@ -501,6 +626,51 @@ export class CouncilImpl implements Council {
         return record.type === 'message.emitted';
       })
       .map((record) => this.snapshotMessage(record.message));
+  }
+
+  private createTurnCompletedRecord(
+    turnId: string,
+    mode: CouncilMode
+  ): Extract<CouncilRecord, { type: 'turn.completed' }> {
+    return {
+      contractVersion: COUNCIL_CONTRACT_VERSION,
+      type: 'turn.completed',
+      councilId: this.state.councilId,
+      turnId,
+      timestamp: new Date().toISOString(),
+      mode,
+    };
+  }
+
+  private createAgentRosterRecord(
+    type: 'agent.added' | 'agent.updated',
+    agentId: string,
+    agent: AgentDefinition,
+    reason?: string
+  ): Extract<CouncilRecord, { type: 'agent.added' | 'agent.updated' }> {
+    return {
+      contractVersion: COUNCIL_CONTRACT_VERSION,
+      type,
+      councilId: this.state.councilId,
+      timestamp: new Date().toISOString(),
+      agentId,
+      agent: snapshotAgentDefinition(agent),
+      reason,
+    };
+  }
+
+  private createAgentRemovedRecord(
+    agentId: string,
+    reason?: string
+  ): Extract<CouncilRecord, { type: 'agent.removed' }> {
+    return {
+      contractVersion: COUNCIL_CONTRACT_VERSION,
+      type: 'agent.removed',
+      councilId: this.state.councilId,
+      timestamp: new Date().toISOString(),
+      agentId,
+      reason,
+    };
   }
 
   private recordTurnError(
@@ -951,15 +1121,67 @@ export class CouncilImpl implements Council {
     }
   }
 
-  private selectAgents(options: TurnOptions | undefined): AgentDefinition[] {
-    const maxAgents =
+  private selectAgents(options: TurnOptions | undefined): {
+    agents: AgentDefinition[];
+    error?: CouncilError;
+  } {
+    const maxAgents = Math.max(
+      0,
       options?.maxAgentReplies ??
-      this.runtimeConfig.maxAgentReplies ??
-      this.agents.size;
+        this.runtimeConfig.maxAgentReplies ??
+        this.agents.size
+    );
+
+    if (options?.activeAgentIds) {
+      const selectedAgents: AgentDefinition[] = [];
+      const seenAgentIds = new Set<string>();
+      const duplicateAgentIds: string[] = [];
+      const unknownAgentIds: string[] = [];
+
+      for (const agentId of options.activeAgentIds) {
+        if (seenAgentIds.has(agentId)) {
+          duplicateAgentIds.push(agentId);
+          continue;
+        }
+
+        seenAgentIds.add(agentId);
+
+        const agent = this.agents.get(agentId);
+        if (!agent) {
+          unknownAgentIds.push(agentId);
+          continue;
+        }
+
+        selectedAgents.push(agent);
+      }
+
+      if (duplicateAgentIds.length > 0 || unknownAgentIds.length > 0) {
+        return {
+          agents: [],
+          error: {
+            code: 'invalid_active_agent_ids',
+            message: 'activeAgentIds must reference unique known agents',
+            data: {
+              requestedAgentIds: [...options.activeAgentIds],
+              duplicateAgentIds,
+              unknownAgentIds,
+              availableAgentIds: Array.from(this.agents.keys()),
+            },
+          },
+        };
+      }
+
+      return {
+        agents: selectedAgents.slice(0, maxAgents),
+      };
+    }
+
     switch (this.runtimeConfig.agentSelectionStrategy) {
       case 'all_in_order':
       default:
-        return Array.from(this.agents.values()).slice(0, maxAgents);
+        return {
+          agents: Array.from(this.agents.values()).slice(0, maxAgents),
+        };
     }
   }
 

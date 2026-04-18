@@ -7,6 +7,7 @@ Multi-agent AI orchestration runtime with three operating modes, private deliber
 - **Three Operating Modes** - `open` (independent responses), `council` (private deliberation → public synthesis), `oracle` (private deliberation → unified voice)
 - **Private/Public Channels** - Agents can deliberate privately before emitting public responses
 - **Event-Sourced** - Pure replay from persisted records, no file system dependencies
+- **Dynamic Live Rosters** - Update the live agent set without clearing council story
 - **Turn-Based API** - Clean separation of durable records vs diagnostic data
 - **Host-Owned Persistence** - Core module is 100% in-memory, host owns all storage
 - **EngineAdapter Pattern** - Bring your own AI provider implementation
@@ -84,6 +85,20 @@ const agents: AgentDefinition[] = [
   }
 ];
 
+const reviewerAgent: AgentDefinition = {
+  id: 'reviewer',
+  name: 'Reviewer',
+  engine: {
+    id: 'local',
+    provider: 'http://localhost:1234',
+    model: 'your-model-name',
+    contextWindow: 8192,
+    charsPerToken: 4,
+  },
+  summary: 'Review specialist',
+  systemPrompt: 'You review existing work and point out concrete issues.',
+};
+
 // 2. Implement ToolHost (optional)
 const toolHost: ToolHost = {
   async execute(call, ctx) {
@@ -121,8 +136,25 @@ const result = await council.post({
   content: 'Analyze this data'
 });
 
+const sync = await council.syncAgents({
+  agents: [...agents, reviewerAgent],
+  reason: 'reviewer added to the idea',
+});
+
+const targeted = await council.post(
+  {
+    actor: { type: 'user', id: 'user-1', name: 'Alice' },
+    content: 'Only the reviewer and analyst should respond'
+  },
+  {
+    activeAgentIds: ['reviewer', 'analyst'],
+  }
+);
+
 // 5. Persist records
 await yourStorage.append(result.records);
+await yourStorage.append(sync.records);
+await yourStorage.append(targeted.records);
 
 // 6. Display responses
 for (const msg of result.publicMessages) {
@@ -136,6 +168,14 @@ for (const msg of result.publicMessages) {
 ```typescript
 const result = await council.post(event, { mode: 'open' });
 // All agents respond independently in public
+```
+
+```typescript
+const targeted = await council.post(event, {
+  mode: 'open',
+  activeAgentIds: ['analyst', 'reviewer'],
+});
+// Only the listed agents are eligible for this turn, in that order
 ```
 
 ### Council Mode

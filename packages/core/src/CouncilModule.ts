@@ -14,6 +14,7 @@ import {
 } from './config.js';
 import { resolveCouncilPromptConfig } from './prompts.js';
 import { CouncilImpl } from './CouncilImpl.js';
+import { createAgentRosterMap, snapshotAgentDefinitions } from './agents.js';
 
 class CouncilModuleImpl implements CouncilModule {
   private agents: AgentDefinition[];
@@ -22,7 +23,9 @@ class CouncilModuleImpl implements CouncilModule {
   private config: CouncilModuleResolvedConfig;
 
   constructor(config: CouncilModuleConfig) {
-    this.agents = config.agents;
+    this.agents = Array.from(
+      createAgentRosterMap(config.agents, 'config.agents').values()
+    );
     this.engines = config.engines;
     this.toolHost = config.toolHost;
     this.config = createModuleConfigSnapshot(
@@ -47,7 +50,7 @@ class CouncilModuleImpl implements CouncilModule {
   }
 
   listAgents(): AgentDefinition[] {
-    return [...this.agents];
+    return snapshotAgentDefinitions(this.agents);
   }
 
   getConfig(): CouncilModuleResolvedConfig {

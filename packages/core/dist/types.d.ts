@@ -215,8 +215,32 @@ export interface TurnOptions {
     emitPublicOracle?: boolean;
     oracleSpeakerAgentId?: string;
     trace?: boolean;
+    activeAgentIds?: string[];
 }
 export type CouncilRecord = {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'agent.added';
+    councilId: string;
+    timestamp: string;
+    agentId: string;
+    agent: AgentDefinition;
+    reason?: string;
+} | {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'agent.updated';
+    councilId: string;
+    timestamp: string;
+    agentId: string;
+    agent: AgentDefinition;
+    reason?: string;
+} | {
+    contractVersion: typeof COUNCIL_CONTRACT_VERSION;
+    type: 'agent.removed';
+    councilId: string;
+    timestamp: string;
+    agentId: string;
+    reason?: string;
+} | {
     contractVersion: typeof COUNCIL_CONTRACT_VERSION;
     type: 'mode.changed';
     councilId: string;
@@ -272,6 +296,16 @@ export type CouncilReplayEntry = {
     type: 'council.record';
     record: CouncilRecord;
 };
+export interface SyncAgentsInput {
+    agents: AgentDefinition[];
+    reason?: string;
+}
+export interface AgentSyncResult {
+    added: string[];
+    updated: string[];
+    removed: string[];
+    records: CouncilRecord[];
+}
 export interface TurnResult {
     turnId: string;
     mode: CouncilMode;
@@ -345,7 +379,9 @@ export type CouncilRuntimeEvent = {
 export interface Council {
     getMode(): CouncilMode;
     getConfig(): CouncilInstanceResolvedConfig;
+    listAgents(): AgentDefinition[];
     replay(entries: Iterable<CouncilReplayEntry> | AsyncIterable<CouncilReplayEntry>): Promise<void>;
+    syncAgents(input: SyncAgentsInput): Promise<AgentSyncResult>;
     post(event: ChatEvent, options?: TurnOptions): Promise<TurnResult>;
     stream(event: ChatEvent, options?: TurnOptions): AsyncIterable<CouncilRuntimeEvent>;
     getMessages(options?: {
